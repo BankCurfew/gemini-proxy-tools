@@ -77,6 +77,27 @@ mosquitto_sub -t 'claude/browser/state' -C 1
 
 ---
 
+## CRITICAL: Always Use `tabId`
+
+Without `tabId`, the extension picks the "most recently active" Gemini tab — which **changes unpredictably** when you have multiple tabs or Gemini opens new conversations. This causes commands to hit the wrong tab every time.
+
+**Always pin to a specific tab:**
+
+```bash
+# Step 1: Find your tab
+mosquitto_pub -t 'claude/browser/command' -m '{"action":"list_tabs","id":"t1"}'
+# Response: {"tabs":[{"id":192573296,"title":"Google Gemini","url":"...","active":true},...]}
+
+# Step 2: Use tabId in EVERY command
+TAB_ID=192573296
+mosquitto_pub -t 'claude/browser/command' \
+  -m '{"action":"chat","text":"Hello","tabId":'$TAB_ID',"id":"c1","ts":'$(date +%s%3N)'}'
+```
+
+The `gemini-gen.sh` script handles this automatically — it pins to the active tab on first run.
+
+---
+
 ## Command Reference
 
 ### Tab Management (no Gemini tab required)
@@ -98,21 +119,40 @@ mosquitto_pub -t 'claude/browser/command' \
 ### Chat & Response
 
 ```bash
-# Send message to Gemini
+TAB_ID=192573296  # Always set this first via list_tabs!
+
+# Send message to Gemini (same conversation)
 mosquitto_pub -t 'claude/browser/command' \
-  -m '{"action":"chat","text":"Explain quantum computing in 3 sentences","id":"c1","ts":'$(date +%s%3N)'}'
+  -m '{"action":"chat","text":"Explain quantum computing","tabId":'$TAB_ID',"id":"c1","ts":'$(date +%s%3N)'}'
+
+# Send message + start NEW conversation in same tab (no new tab!)
+mosquitto_pub -t 'claude/browser/command' \
+  -m '{"action":"chat","text":"Generate a cat","tabId":'$TAB_ID',"newChat":true,"id":"c2","ts":'$(date +%s%3N)'}'
 
 # Wait for Gemini to finish responding (timeout in ms)
 mosquitto_pub -t 'claude/browser/command' \
-  -m '{"action":"wait_response","timeout":30000,"id":"w1","ts":'$(date +%s%3N)'}'
+  -m '{"action":"wait_response","timeout":30000,"tabId":'$TAB_ID',"id":"w1","ts":'$(date +%s%3N)'}'
 
 # Get latest response text
 mosquitto_pub -t 'claude/browser/command' \
-  -m '{"action":"get_response","id":"r1","ts":'$(date +%s%3N)'}'
+  -m '{"action":"get_response","tabId":'$TAB_ID',"id":"r1","ts":'$(date +%s%3N)'}'
 
 # Get all page text
 mosquitto_pub -t 'claude/browser/command' \
-  -m '{"action":"get_text","id":"gt1","ts":'$(date +%s%3N)'}'
+  -m '{"action":"get_text","tabId":'$TAB_ID',"id":"gt1","ts":'$(date +%s%3N)'}'
+```
+
+### Image Extraction & Download
+
+```bash
+# Get image URLs + metadata from Gemini responses
+mosquitto_pub -t 'claude/browser/command' \
+  -m '{"action":"get_images","tabId":'$TAB_ID',"id":"gi1","ts":'$(date +%s%3N)'}'
+
+# Download all generated images from responses
+mosquitto_pub -t 'claude/browser/command' \
+  -m '{"action":"download_images","tabId":'$TAB_ID',"prefix":"my_image","id":"dl1","ts":'$(date +%s%3N)'}'
+# Options: prefix (filename), responseIndex (-1=all, 0=first, etc.)
 ```
 
 ### Page Interaction
@@ -320,11 +360,13 @@ client.on("connect", async () => {
 
 ### Key Rules for AI Agents
 
-1. **Always include `ts` field** — Messages without `ts` newer than extension's `connectedAt` are ignored as stale
-2. **Use unique `id`** — Match responses to commands by `id`
-3. **Poll `get_state` before acting** — Check `loading: false` before sending new commands
-4. **Image responses have no text** — `get_response` returns error for image-only outputs, use `get_text` instead
-5. **Timeout `wait_response` for images** — Image generation returns minimal text, so `wait_response` may timeout; monitor `responseCount` change instead
+1. **ALWAYS use `tabId`** — Without it, the extension picks a random active tab. Get tabId from `list_tabs` first, then include it in EVERY command
+2. **Always include `ts` field** — Messages without `ts` newer than extension's `connectedAt` are ignored as stale
+3. **Use unique `id`** — Match responses to commands by `id`
+4. **Poll `get_state` with tabId** — Check `loading: false` before sending new commands
+5. **Image responses have no text** — `get_response` returns error for image-only outputs, use `get_text` instead
+6. **Use `newChat: true` carefully** — It navigates to `/app` (new conversation) in the same tab. Only use when you want a fresh conversation, NOT for continuing the same one
+7. **Timeout `wait_response` for images** — Image generation returns minimal text, so `wait_response` may timeout; monitor `responseCount` change via `get_state` instead
 
 ---
 
@@ -336,10 +378,13 @@ client.on("connect", async () => {
 |---------|-------|-----|
 | Badge is red | MQTT not connected | Check broker: `ss -tlnp \| grep 9001` |
 | "tab is not defined" | Extension reloaded, no Gemini tab | Open gemini.google.com |
-| "Not on Gemini page" | Active tab is not Gemini | Use `tabId` parameter or focus Gemini |
+| "Not on Gemini page" | Active tab is not Gemini | Use `tabId` parameter |
 | "Response is empty" | Response is image/non-text | Use `get_text` for full page content |
-| No response on MQTT | Extension service worker sleeping | Send any command to wake it |
+| Commands hit wrong tab | No `tabId` specified | **Always use `tabId`** — get it from `list_tabs` |
+| New conversation each gen | `newChat:true` or no `tabId` | Remove `newChat`, pin `tabId` |
+| No response on MQTT | `let` scoping bug (pre-fix) | Update extension — [see bug case study](#bug-case-study-let-scoping-kills-mqtt-response) |
 | "stale message" in logs | Command `ts` < extension `connectedAt` | Always set `ts: Date.now()` |
+| CORS blocked download | Canvas tainted by cross-origin img | Extension uses direct URL download (auto-fallback) |
 
 ### Debug Commands
 
