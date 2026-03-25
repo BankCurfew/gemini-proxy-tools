@@ -1,17 +1,19 @@
 #!/bin/bash
-# gemini-gen.sh — Generate image via Gemini
-# Usage: ./gemini-gen.sh "image description" [--new] [--download prefix]
-# Default: sends to current conversation in same tab. Use --new to start fresh conversation.
+# gemini-gen.sh — Generate image via Gemini (pinned to one tab)
+# Usage: ./gemini-gen.sh "prompt" [--tab ID] [--new] [--download prefix]
+# Default: pins to active Gemini tab and reuses it for all requests.
 
 set -euo pipefail
 
-TEXT="${1:?Usage: gemini-gen.sh \"image description\" [--new] [--download prefix]}"
+TEXT="${1:?Usage: gemini-gen.sh \"prompt\" [--tab ID] [--new] [--download prefix]}"
 shift
 NEW_CHAT=false
 DL_PREFIX=""
+TAB_ID=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --new) NEW_CHAT=true; shift;;
+    --tab) TAB_ID="$2"; shift 2;;
     --download) DL_PREFIX="${2:-gemini}"; shift 2;;
     *) shift;;
   esac
@@ -19,34 +21,56 @@ done
 
 ID="gen_$(date +%s)"
 
-# Get initial response count from state stream
-INITIAL_COUNT=$(mosquitto_sub -t 'claude/browser/state' -C 1 -W 3 2>/dev/null \
-  | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))" 2>/dev/null || echo "0")
+# Resolve tab — pin to specific tab or find active one
+if [ -z "$TAB_ID" ]; then
+  TAB_ID=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 2>/dev/null < <(
+    sleep 0.5
+    mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"list_tabs\",\"id\":\"lt_${ID}\",\"ts\":$(date +%s%3N)}"
+  ) | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+tabs = d.get('tabs', [])
+# Prefer active tab, else first gemini tab
+active = [t for t in tabs if t.get('active')]
+print(active[0]['id'] if active else tabs[0]['id'] if tabs else '')
+" 2>/dev/null || echo "")
+  if [ -z "$TAB_ID" ]; then
+    echo "[!] No Gemini tab found"
+    exit 1
+  fi
+fi
 
-# Build and send chat command
-EXTRA=""
-[ "$NEW_CHAT" = "true" ] && EXTRA=",\"newChat\":true"
+echo "[tab:$TAB_ID]"
+
+# Get initial response count from THIS specific tab
+INITIAL_COUNT=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 2>/dev/null < <(
+  sleep 0.5
+  mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"get_state\",\"tabId\":$TAB_ID,\"id\":\"st_${ID}\",\"ts\":$(date +%s%3N)}"
+) | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))" 2>/dev/null || echo "0")
+
+# Build and send chat to PINNED tab
+EXTRA=",\"tabId\":$TAB_ID"
+[ "$NEW_CHAT" = "true" ] && EXTRA="$EXTRA,\"newChat\":true"
 mosquitto_pub -t 'claude/browser/command' \
   -m "{\"action\":\"chat\",\"text\":$(printf '%s' "$TEXT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"id\":\"${ID}\"${EXTRA},\"ts\":$(date +%s%3N)}"
 echo "[>] Sent (responses: $INITIAL_COUNT)"
 
-# Single subscribe — stream state messages until responseCount increases
-# No per-iteration process spawn, detects within ~2s of completion
-RESULT=$(timeout 45 mosquitto_sub -t 'claude/browser/state' 2>/dev/null \
-  | python3 -u -c "
-import sys, json, time
-start = time.time()
-for line in sys.stdin:
-    try:
-        d = json.loads(line.strip())
-        c = d.get('responseCount', 0)
-        l = d.get('loading', False)
-        elapsed = int(time.time() - start)
-        if c > $INITIAL_COUNT and not l:
-            print(f'OK {elapsed}s responses:{$INITIAL_COUNT}->{c}')
-            sys.exit(0)
-        print(f'\r[~] {elapsed}s loading={l} count={c}', end='', file=sys.stderr, flush=True)
-    except: pass
+# Poll state on PINNED tab until responseCount increases
+RESULT=$(timeout 45 bash -c "
+while true; do
+  R=\$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 2>/dev/null < <(
+    sleep 0.3
+    mosquitto_pub -t 'claude/browser/command' -m '{\"action\":\"get_state\",\"tabId\":$TAB_ID,\"id\":\"poll_\$(date +%s%3N)\",\"ts\":\$(date +%s%3N)}'
+  ) 2>/dev/null || echo '{}')
+  COUNT=\$(echo \"\$R\" | python3 -c \"import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))\" 2>/dev/null || echo 0)
+  LOADING=\$(echo \"\$R\" | python3 -c \"import sys,json; print(json.loads(sys.stdin.read()).get('loading',False))\" 2>/dev/null || echo False)
+  if [ \"\$COUNT\" -gt \"$INITIAL_COUNT\" ] && [ \"\$LOADING\" = \"False\" ]; then
+    echo \"OK count:\${COUNT}\"
+    exit 0
+  fi
+  printf '.' >&2
+  sleep 1
+done
 " 2>&1)
 
 if echo "$RESULT" | grep -q "^OK"; then
@@ -55,8 +79,8 @@ if echo "$RESULT" | grep -q "^OK"; then
 
   if [ -n "$DL_PREFIX" ]; then
     mosquitto_pub -t 'claude/browser/command' \
-      -m "{\"action\":\"download_images\",\"prefix\":\"${DL_PREFIX}\",\"id\":\"dl_${ID}\",\"ts\":$(date +%s%3N)}"
-    sleep 1
+      -m "{\"action\":\"download_images\",\"prefix\":\"${DL_PREFIX}\",\"tabId\":$TAB_ID,\"id\":\"dl_${ID}\",\"ts\":$(date +%s%3N)}"
+    sleep 2
     DL=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 2>/dev/null \
       | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(f'Downloaded {d.get(\"downloaded\",0)} image(s)')" 2>/dev/null || echo "download sent")
     echo "[OK] $DL"
