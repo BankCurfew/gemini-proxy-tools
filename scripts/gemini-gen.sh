@@ -18,45 +18,51 @@ done
 
 ID="gen_$(date +%s)"
 
-# Get initial response count (skip status check — trust state poll)
-STATE=$(mosquitto_sub -t 'claude/browser/state' -C 1 -W 3 2>/dev/null || echo '{}')
-INITIAL_COUNT=$(echo "$STATE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))" 2>/dev/null || echo "0")
+# Get initial response count from state stream
+INITIAL_COUNT=$(mosquitto_sub -t 'claude/browser/state' -C 1 -W 3 2>/dev/null \
+  | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))" 2>/dev/null || echo "0")
 
-# Build chat command
-if [ "$NEW_CHAT" = "true" ]; then
-  CHAT_CMD="{\"action\":\"chat\",\"text\":$(printf '%s' "$TEXT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"newChat\":true,\"id\":\"${ID}\",\"ts\":$(date +%s%3N)}"
-else
-  CHAT_CMD="{\"action\":\"chat\",\"text\":$(printf '%s' "$TEXT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"id\":\"${ID}\",\"ts\":$(date +%s%3N)}"
-fi
+# Build and send chat command
+EXTRA=""
+[ "$NEW_CHAT" = "true" ] && EXTRA=",\"newChat\":true"
+mosquitto_pub -t 'claude/browser/command' \
+  -m "{\"action\":\"chat\",\"text\":$(printf '%s' "$TEXT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"id\":\"${ID}\"${EXTRA},\"ts\":$(date +%s%3N)}"
+echo "[>] Sent (responses: $INITIAL_COUNT)"
 
-echo "[>] Sending prompt (responses: $INITIAL_COUNT)..."
-mosquitto_pub -t 'claude/browser/command' -m "$CHAT_CMD"
+# Single subscribe — stream state messages until responseCount increases
+# No per-iteration process spawn, detects within ~2s of completion
+RESULT=$(timeout 45 mosquitto_sub -t 'claude/browser/state' 2>/dev/null \
+  | python3 -u -c "
+import sys, json, time
+start = time.time()
+for line in sys.stdin:
+    try:
+        d = json.loads(line.strip())
+        c = d.get('responseCount', 0)
+        l = d.get('loading', False)
+        elapsed = int(time.time() - start)
+        if c > $INITIAL_COUNT and not l:
+            print(f'OK {elapsed}s responses:{$INITIAL_COUNT}->{c}')
+            sys.exit(0)
+        print(f'\r[~] {elapsed}s loading={l} count={c}', end='', file=sys.stderr, flush=True)
+    except: pass
+" 2>&1)
 
-# Poll every 1s — image gen usually takes 5-15s
-for i in $(seq 1 45); do
-  sleep 1
-  STATE=$(mosquitto_sub -t 'claude/browser/state' -C 1 -W 2 2>/dev/null || echo '{}')
-  COUNT=$(echo "$STATE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))" 2>/dev/null || echo "0")
-  LOADING=$(echo "$STATE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('loading',False))" 2>/dev/null || echo "False")
+if echo "$RESULT" | grep -q "^OK"; then
+  echo ""
+  echo "[OK] $RESULT"
 
-  if [ "$COUNT" -gt "$INITIAL_COUNT" ] && [ "$LOADING" = "False" ]; then
-    echo " OK ($((i))s, responses: $INITIAL_COUNT -> $COUNT)"
-
-    # Auto-download if requested
-    if [ -n "$DL_PREFIX" ]; then
-      echo "[>] Downloading..."
-      mosquitto_pub -t 'claude/browser/command' \
-        -m "{\"action\":\"download_images\",\"prefix\":\"${DL_PREFIX}\",\"responseIndex\":-1,\"id\":\"dl_${ID}\",\"ts\":$(date +%s%3N)}"
-      sleep 2
-      DL_RESULT=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 2>/dev/null || echo '{}')
-      DL_COUNT=$(echo "$DL_RESULT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('downloaded',0))" 2>/dev/null || echo "0")
-      echo "[OK] Downloaded $DL_COUNT image(s)"
-    fi
-    exit 0
+  if [ -n "$DL_PREFIX" ]; then
+    mosquitto_pub -t 'claude/browser/command' \
+      -m "{\"action\":\"download_images\",\"prefix\":\"${DL_PREFIX}\",\"id\":\"dl_${ID}\",\"ts\":$(date +%s%3N)}"
+    sleep 1
+    DL=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 2>/dev/null \
+      | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(f'Downloaded {d.get(\"downloaded\",0)} image(s)')" 2>/dev/null || echo "download sent")
+    echo "[OK] $DL"
   fi
-  printf "."
-done
-
-echo ""
-echo "[!] Timeout (45s) — check Gemini tab"
-exit 1
+  exit 0
+else
+  echo ""
+  echo "[!] Timeout (45s)"
+  exit 1
+fi
