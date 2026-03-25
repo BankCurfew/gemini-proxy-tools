@@ -416,6 +416,8 @@ client.on("connect", async () => {
 | "Response is empty" | Response is image/non-text | Use `get_text` for full page content |
 | Commands hit wrong tab | No `tabId` specified | **Always use `tabId`** — get it from `list_tabs` |
 | New conversation each gen | `newChat:true` or no `tabId` | Remove `newChat`, pin `tabId` |
+| Chat creates new conversation | Quill editor not registering text | Update extension — uses char-by-char `execCommand('insertText')` to trigger Quill's mutation observer |
+| `quillReady: false` in response | Text insert method doesn't work with Quill | `innerHTML`, `clipboard paste`, `beforeinput` all fail — only `execCommand('insertText')` per character works |
 | No response on MQTT | `let` scoping bug (pre-fix) | Update extension — [see bug case study](#bug-case-study-let-scoping-kills-mqtt-response) |
 | "stale message" in logs | Command `ts` < extension `connectedAt` | Always set `ts: Date.now()` |
 | CORS blocked download | Canvas tainted by cross-origin img | Extension uses direct URL download (auto-fallback) |
