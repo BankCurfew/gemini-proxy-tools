@@ -1,17 +1,17 @@
 #!/bin/bash
 # gemini-gen.sh — Generate image via Gemini
-# Usage: ./gemini-gen.sh "image description" [--same] [--download prefix]
-# Default: opens new chat in same tab (no new tabs). Use --same to continue current chat.
+# Usage: ./gemini-gen.sh "image description" [--new] [--download prefix]
+# Default: sends to current conversation in same tab. Use --new to start fresh conversation.
 
 set -euo pipefail
 
-TEXT="${1:?Usage: gemini-gen.sh \"image description\" [--same] [--download prefix]}"
+TEXT="${1:?Usage: gemini-gen.sh \"image description\" [--new] [--download prefix]}"
 shift
-NEW_CHAT=true
+NEW_CHAT=false
 DL_PREFIX=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --same) NEW_CHAT=false; shift;;
+    --new) NEW_CHAT=true; shift;;
     --download) DL_PREFIX="${2:-gemini}"; shift 2;;
     *) shift;;
   esac
