@@ -227,68 +227,102 @@ wait
 
 ## Full Workflow Examples
 
-### Example 1: Generate Image
+### Example 1: Generate Image (Correct Way)
 
 ```bash
 #!/bin/bash
-# generate-image.sh — Send prompt to Gemini and wait for result
+# generate-image.sh — Pin tab, gen image, download
 
-PROMPT="$1"
-ID="img_$(date +%s)"
+PROMPT="${1:?Usage: generate-image.sh \"prompt\" [prefix]}"
+PREFIX="${2:-gemini_img}"
 
-echo "Sending prompt..."
+# Step 1: Get active Gemini tab (pin it!)
+TAB_ID=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 < <(
+  sleep 0.5; mosquitto_pub -t 'claude/browser/command' \
+    -m '{"action":"list_tabs","id":"lt","ts":'$(date +%s%3N)'}'
+) | python3 -c "
+import sys, json
+tabs = json.loads(sys.stdin.read()).get('tabs',[])
+active = [t for t in tabs if t.get('active')]
+print(active[0]['id'] if active else tabs[0]['id'] if tabs else '')
+")
+echo "[tab:$TAB_ID]"
+
+# Step 2: Get initial response count FROM THIS TAB
+INITIAL=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 < <(
+  sleep 0.5; mosquitto_pub -t 'claude/browser/command' \
+    -m "{\"action\":\"get_state\",\"tabId\":$TAB_ID,\"id\":\"st\",\"ts\":$(date +%s%3N)}"
+) | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))")
+
+# Step 3: Send prompt to PINNED tab
 mosquitto_pub -t 'claude/browser/command' \
-  -m "{\"action\":\"chat\",\"text\":\"$PROMPT\",\"id\":\"${ID}_chat\",\"ts\":$(date +%s%3N)}"
+  -m "{\"action\":\"chat\",\"text\":$(printf '%s' "$PROMPT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"tabId\":$TAB_ID,\"id\":\"chat\",\"ts\":$(date +%s%3N)}"
+echo "[>] Sent (responses: $INITIAL)"
 
-echo "Waiting for response..."
-sleep 2
-
-mosquitto_pub -t 'claude/browser/command' \
-  -m "{\"action\":\"wait_response\",\"timeout\":60000,\"id\":\"${ID}_wait\",\"ts\":$(date +%s%3N)}"
-
-# Listen for the answer
-mosquitto_sub -t 'claude/browser/answer' -C 1 -W 65
-```
-
-### Example 2: Chat and Extract Answer
-
-```bash
-#!/bin/bash
-# ask-gemini.sh — Ask Gemini a question, get text answer
-
-QUESTION="$1"
-ID="ask_$(date +%s)"
-
-# Subscribe in background
-(mosquitto_sub -t 'claude/browser/answer' -C 1 -W 60 > /tmp/gemini_answer.json) &
-SUB_PID=$!
-
-# Send question
-mosquitto_pub -t 'claude/browser/command' \
-  -m "{\"action\":\"chat\",\"text\":\"$QUESTION\",\"id\":\"${ID}\",\"ts\":$(date +%s%3N)}"
-
-# Wait for response to complete
-sleep 3
-mosquitto_pub -t 'claude/browser/command' \
-  -m "{\"action\":\"wait_response\",\"timeout\":30000,\"id\":\"${ID}_wait\",\"ts\":$(date +%s%3N)}"
-
-wait $SUB_PID
-cat /tmp/gemini_answer.json | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('answer','No answer'))"
-```
-
-### Example 3: Monitor Gemini State
-
-```bash
-#!/bin/bash
-# monitor.sh — Watch Gemini state in real-time
-
-echo "Monitoring Gemini state (Ctrl+C to stop)..."
-mosquitto_sub -t 'claude/browser/state' -v | while read -r topic msg; do
-  loading=$(echo "$msg" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('loading',False))")
-  count=$(echo "$msg" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))")
-  tool=$(echo "$msg" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('tool','none'))")
-  echo "[$(date +%H:%M:%S)] loading=$loading responses=$count tool=$tool"
+# Step 4: Poll SAME tab until responseCount increases
+for i in $(seq 1 30); do
+  sleep 2
+  STATE=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 < <(
+    sleep 0.3; mosquitto_pub -t 'claude/browser/command' \
+      -m "{\"action\":\"get_state\",\"tabId\":$TAB_ID,\"id\":\"poll\",\"ts\":$(date +%s%3N)}"
+  ))
+  COUNT=$(echo "$STATE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))" 2>/dev/null)
+  [ "$COUNT" -gt "$INITIAL" ] && { echo " Done! ($COUNT responses)"; break; }
+  printf "."
 done
+
+# Step 5: Download from SAME tab
+mosquitto_pub -t 'claude/browser/command' \
+  -m "{\"action\":\"download_images\",\"tabId\":$TAB_ID,\"prefix\":\"$PREFIX\",\"id\":\"dl\",\"ts\":$(date +%s%3N)}"
+echo "[OK] Download started"
+```
+
+### Example 2: Batch Generate (Multiple Images, Same Tab)
+
+```bash
+#!/bin/bash
+# batch-gen.sh — Generate multiple images in one Gemini conversation
+
+# Pin tab ONCE at the start
+TAB_ID=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 < <(
+  sleep 0.5; mosquitto_pub -t 'claude/browser/command' \
+    -m '{"action":"list_tabs","id":"lt","ts":'$(date +%s%3N)'}'
+) | python3 -c "import sys,json; t=json.loads(sys.stdin.read())['tabs']; print([x for x in t if x['active']][0]['id'])")
+echo "Pinned to tab: $TAB_ID"
+
+# Generate each image in the SAME conversation
+for SCENE in "golden sunset bridge" "dark forest path" "mountain peak dawn"; do
+  echo "--- Generating: $SCENE ---"
+
+  BEFORE=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 < <(
+    sleep 0.3; mosquitto_pub -t 'claude/browser/command' \
+      -m "{\"action\":\"get_state\",\"tabId\":$TAB_ID,\"id\":\"st\",\"ts\":$(date +%s%3N)}"
+  ) | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))")
+
+  mosquitto_pub -t 'claude/browser/command' \
+    -m "{\"action\":\"chat\",\"text\":\"Generate image: $SCENE\",\"tabId\":$TAB_ID,\"id\":\"gen\",\"ts\":$(date +%s%3N)}"
+
+  # Wait for completion
+  for i in $(seq 1 30); do
+    sleep 2
+    NOW=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 < <(
+      sleep 0.3; mosquitto_pub -t 'claude/browser/command' \
+        -m "{\"action\":\"get_state\",\"tabId\":$TAB_ID,\"id\":\"poll\",\"ts\":$(date +%s%3N)}"
+    ) | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))" 2>/dev/null)
+    [ "$NOW" -gt "$BEFORE" ] && { echo " Done ($NOW)"; break; }
+    printf "."
+  done
+done
+```
+
+### Example 3: Using gemini-gen.sh (Recommended)
+
+```bash
+# Auto-pins tab, polls fast, optional download
+./scripts/gemini-gen.sh "a mystical forest with glowing mushrooms"
+./scripts/gemini-gen.sh "golden sunset over ocean" --download sunset
+./scripts/gemini-gen.sh "something new" --new  # Start fresh conversation
+./scripts/gemini-gen.sh "continue here" --tab 192573296  # Pin specific tab
 ```
 
 ---
