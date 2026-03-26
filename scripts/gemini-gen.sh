@@ -56,22 +56,25 @@ mosquitto_pub -t 'claude/browser/command' \
 echo "[>] Sent (responses: $INITIAL_COUNT)"
 
 # Poll state on PINNED tab until responseCount increases
-RESULT=$(timeout 45 bash -c "
+RESULT=$(timeout 30 bash -c '
+TAB_ID='"$TAB_ID"'
+INITIAL_COUNT='"$INITIAL_COUNT"'
 while true; do
-  R=\$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 2>/dev/null < <(
+  TS=$(date +%s%3N)
+  R=$(mosquitto_sub -t "claude/browser/response" -C 1 -W 5 2>/dev/null < <(
     sleep 0.3
-    mosquitto_pub -t 'claude/browser/command' -m '{\"action\":\"get_state\",\"tabId\":$TAB_ID,\"id\":\"poll_\$(date +%s%3N)\",\"ts\":\$(date +%s%3N)}'
-  ) 2>/dev/null || echo '{}')
-  COUNT=\$(echo \"\$R\" | python3 -c \"import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))\" 2>/dev/null || echo 0)
-  LOADING=\$(echo \"\$R\" | python3 -c \"import sys,json; print(json.loads(sys.stdin.read()).get('loading',False))\" 2>/dev/null || echo False)
-  if [ \"\$COUNT\" -gt \"$INITIAL_COUNT\" ] && [ \"\$LOADING\" = \"False\" ]; then
-    echo \"OK count:\${COUNT}\"
+    mosquitto_pub -t "claude/browser/command" -m "{\"action\":\"get_state\",\"tabId\":${TAB_ID},\"id\":\"poll_${TS}\",\"ts\":${TS}}"
+  ) 2>/dev/null || echo "{}")
+  COUNT=$(echo "$R" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('"'"'responseCount'"'"',0))" 2>/dev/null || echo 0)
+  LOADING=$(echo "$R" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('"'"'loading'"'"',False))" 2>/dev/null || echo False)
+  if [ "$COUNT" -gt "$INITIAL_COUNT" ] && [ "$LOADING" = "False" ]; then
+    echo "OK count:${COUNT}"
     exit 0
   fi
-  printf '.' >&2
+  printf "(%ds · timeout 2m)\r" "$SECONDS" >&2
   sleep 1
 done
-" 2>&1)
+' 2>&1)
 
 if echo "$RESULT" | grep -q "^OK"; then
   echo ""
@@ -88,6 +91,6 @@ if echo "$RESULT" | grep -q "^OK"; then
   exit 0
 else
   echo ""
-  echo "[!] Timeout (45s)"
+  echo "[!] Timeout (30s)"
   exit 1
 fi
