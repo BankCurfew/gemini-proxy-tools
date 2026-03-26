@@ -91,12 +91,28 @@ if echo "$RESULT" | grep -q "^OK"; then
   echo "[OK] $RESULT"
 
   if [ -n "$DL_PREFIX" ]; then
+    DL_CMD_ID="dl_${ID}"
+    # Clear retained response to avoid stale reads
+    mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
+    sleep 0.5
     mosquitto_pub -t 'claude/browser/command' \
-      -m "{\"action\":\"download_images\",\"prefix\":\"${DL_PREFIX}\",\"tabId\":$TAB_ID,\"id\":\"dl_${ID}\",\"ts\":$(date +%s%3N)}"
-    sleep 2
-    DL=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 2>/dev/null \
-      | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(f'Downloaded {d.get(\"downloaded\",0)} image(s)')" 2>/dev/null || echo "download sent")
+      -m "{\"action\":\"download_images\",\"prefix\":\"${DL_PREFIX}\",\"tabId\":$TAB_ID,\"id\":\"${DL_CMD_ID}\",\"ts\":$(date +%s%3N)}"
+    # Filter responses by id to avoid get_state pollution
+    DL=$(timeout 10 mosquitto_sub -t 'claude/browser/response' -C 10 2>/dev/null \
+      | python3 -c "
+import sys, json
+for line in sys.stdin:
+    try:
+        d = json.loads(line.strip())
+        if d.get('id') == '${DL_CMD_ID}':
+            print(f'Downloaded {d.get(\"downloaded\",0)} image(s) to Windows Downloads')
+            break
+    except: pass
+else:
+    print('download sent (no matching response)')
+" 2>/dev/null || echo "download sent")
     echo "[OK] $DL"
+    echo "[!] Files land in /mnt/c/Users/\$USER/Downloads/ (may be named 'unnamed (N).jpg')"
   fi
   exit 0
 else

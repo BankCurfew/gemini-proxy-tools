@@ -153,6 +153,8 @@ mosquitto_pub -t 'claude/browser/command' \
 mosquitto_pub -t 'claude/browser/command' \
   -m '{"action":"download_images","tabId":'$TAB_ID',"prefix":"my_image","id":"dl1","ts":'$(date +%s%3N)'}'
 # Options: prefix (filename), responseIndex (-1=all, 0=first, etc.)
+# NOTE: Chrome may save as "unnamed (N).jpg" ignoring the prefix param.
+# Files land in Windows Downloads: /mnt/c/Users/<user>/Downloads/
 ```
 
 ### Page Interaction
@@ -401,6 +403,9 @@ client.on("connect", async () => {
 5. **Image responses have no text** — `get_response` returns error for image-only outputs, use `get_text` instead
 6. **Use `newChat: true` carefully** — It navigates to `/app` (new conversation) in the same tab. Only use when you want a fresh conversation, NOT for continuing the same one
 7. **Timeout `wait_response` for images** — Image generation returns minimal text, so `wait_response` may timeout; monitor `responseCount` change via `get_state` instead
+8. **Filter responses by `id`** — The `claude/browser/response` topic is shared by ALL commands. If you poll `get_state` in a loop, its responses will flood the topic and you'll miss `download_images` or other responses. Always match `response.id` to your command's `id` to find the right reply
+9. **Don't poll `get_state` too fast** — Polling every 1-2s floods the response topic. Use 3-5s intervals. Kill polling loops before issuing other commands
+10. **Downloads land on Windows side** — `download_images` uses Chrome's `chrome.downloads` API. Files go to Windows Downloads folder (`/mnt/c/Users/<user>/Downloads/`), NOT WSL. Chrome may ignore the `prefix` param and save as `unnamed (N).jpg`
 
 ---
 
@@ -424,6 +429,9 @@ client.on("connect", async () => {
 | `get_images` returns 0 but image is visible | Gemini renders images inside shadow DOM web components | Update extension — uses `deepQueryAll()` to walk shadow roots (v2.10+) |
 | `download_images` says "No images found" | Same shadow DOM issue | Update extension to latest — shadow DOM traversal added |
 | `gemini-gen.sh` polling shows "Unknown action: undefined" | Shell escaping bug: `$(date)` not evaluated inside `bash -c` | Update script — fixed in [cf12d36](https://github.com/BankCurfew/gemini-proxy-tools/commit/cf12d36) |
+| `download_images` reports success but no file in WSL | Chrome downloads go to Windows filesystem | Check `/mnt/c/Users/<user>/Downloads/` — files save as `unnamed (N).jpg` |
+| `download_images` response not received | Polling loop floods `response` topic with `get_state` replies | Kill polling loops first, clear retained: `mosquitto_pub -t 'claude/browser/response' -r -n`, then filter response by `id` |
+| Extension shows online in Chrome but `mosquitto_sub` gets nothing | Extension service worker died silently | Reload extension at `chrome://extensions/`, verify badge shows green version |
 
 ### Debug Commands
 
