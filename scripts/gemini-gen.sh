@@ -21,6 +21,16 @@ done
 
 ID="gen_$(date +%s)"
 
+# Pre-flight: check extension is online
+STATUS=$(mosquitto_sub -t 'claude/browser/status' -C 1 -W 5 2>/dev/null || echo '{}')
+EXT_STATUS=$(echo "$STATUS" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('status','offline'))" 2>/dev/null || echo "offline")
+if [ "$EXT_STATUS" != "online" ]; then
+  echo "[!] Extension offline — reload at chrome://extensions/ then retry"
+  exit 1
+fi
+EXT_VER=$(echo "$STATUS" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('version','?'))" 2>/dev/null || echo "?")
+echo "[ext:v${EXT_VER}]"
+
 # Resolve tab — pin to specific tab or find active one
 if [ -z "$TAB_ID" ]; then
   TAB_ID=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 2>/dev/null < <(
