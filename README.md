@@ -2,7 +2,7 @@
 
 > MQTT-powered bridge between CLI agents and Google Gemini browser — control Gemini from terminal, automate image generation, extract responses, and more.
 
-**For**: Humans & AI Agents | **Stack**: Chrome Extension + MQTT (Mosquitto) + WebSocket | **Repo**: [claude-browser-proxy](https://github.com/Soul-Brews-Studio/claude-browser-proxy)
+**For**: Humans & AI Agents | **Stack**: Chrome Extension + MQTT (Mosquitto) + WebSocket | **Repo**: [claude-browser-proxy](https://github.com/BankCurfew/claude-browser-proxy)
 
 ---
 
@@ -421,6 +421,9 @@ client.on("connect", async () => {
 | No response on MQTT | `let` scoping bug (pre-fix) | Update extension — [see bug case study](#bug-case-study-let-scoping-kills-mqtt-response) |
 | "stale message" in logs | Command `ts` < extension `connectedAt` | Always set `ts: Date.now()` |
 | CORS blocked download | Canvas tainted by cross-origin img | Extension uses direct URL download (auto-fallback) |
+| `get_images` returns 0 but image is visible | Gemini renders images inside shadow DOM web components | Update extension — uses `deepQueryAll()` to walk shadow roots (v2.10+) |
+| `download_images` says "No images found" | Same shadow DOM issue | Update extension to latest — shadow DOM traversal added |
+| `gemini-gen.sh` polling shows "Unknown action: undefined" | Shell escaping bug: `$(date)` not evaluated inside `bash -c` | Update script — fixed in [cf12d36](https://github.com/BankCurfew/gemini-proxy-tools/commit/cf12d36) |
 
 ### Debug Commands
 
@@ -545,6 +548,40 @@ async function handleCommand(topic, command) {
 5. **Verify**: Add try/catch around the suspect code → error reveals "tab is not defined"
 6. **Fix**: Move declaration to correct scope
 7. **Confirm**: Test all command types after fix
+
+---
+
+## Bug Case Study: Shadow DOM Hides Gemini Images (2026-03)
+
+### The Bug
+
+`get_images` and `download_images` return 0 images even though Gemini visibly generated an image. The `get_text` response shows "Gemini said" followed by empty content (just 💾🔊✓ icons).
+
+### Root Cause
+
+Google Gemini updated their frontend to render generated images inside **shadow DOM web components**. Standard `document.querySelectorAll('img')` cannot reach elements inside shadow roots — they are invisible to normal DOM queries.
+
+### Fix
+
+Added `deepQueryAll()` helper that recursively walks shadow roots:
+
+```javascript
+function deepQueryAll(root, selector) {
+  const results = Array.from(root.querySelectorAll(selector));
+  for (const el of root.querySelectorAll('*')) {
+    if (el.shadowRoot) {
+      results.push(...deepQueryAll(el.shadowRoot, selector));
+    }
+  }
+  return results;
+}
+```
+
+Both `get_images` and `download_images` now use this for all element types: `img`, `canvas`, `[style*="background-image"]`, and `picture source`.
+
+### Lesson
+
+> Web components with shadow DOM are increasingly common in Google products. Any DOM scraping extension must account for shadow roots — standard `querySelectorAll` only searches the light DOM. Always use recursive shadow root traversal when interacting with modern web apps.
 
 ---
 
