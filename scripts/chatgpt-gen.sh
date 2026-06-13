@@ -5,7 +5,10 @@
 
 set -euo pipefail
 
-TEXT="${1:?Usage: chatgpt-gen.sh \"prompt\" [--new] [--download prefix] [--tab ID] [--keep]}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/mqtt-log.sh"
+
+TEXT="${1:?Usage: chatgpt-gen.sh \"prompt\" [--new] [--download prefix] [--tab ID] [--keep] [--verbose]}"
 shift
 NEW_CHAT=false
 DL_PREFIX=""
@@ -17,6 +20,7 @@ while [[ $# -gt 0 ]]; do
     --keep) KEEP_CHAT=true; shift;;
     --tab) TAB_ID="$2"; shift 2;;
     --download) DL_PREFIX="${2:-chatgpt}"; shift 2;;
+    --verbose) MQTT_VERBOSE=true; shift;;
     *) shift;;
   esac
 done
@@ -24,12 +28,14 @@ done
 ID="cgpt_$(date +%s)"
 
 # Pre-flight: ping extension
-mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
+mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
 sleep 0.3
+_mqtt_start=$(date +%s%3N)
 PING=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 2>/dev/null < <(
   sleep 0.5
   mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"list_tabs\",\"id\":\"ping_${ID}\",\"ts\":$(date +%s%3N)}"
 ) 2>/dev/null || echo '{}')
+mqtt_log "ping" "claude/browser/response" "$([ -n "$PING" ] && echo ok || echo empty)" "$(( $(date +%s%3N) - _mqtt_start ))"
 PING_OK=$(echo "$PING" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('ok' if d.get('success') else 'fail')" 2>/dev/null || echo "fail")
 if [ "$PING_OK" != "ok" ]; then
   echo "[!] Extension offline — reload at chrome://extensions/ then retry"
@@ -57,19 +63,23 @@ echo "[tab:$TAB_ID]"
 if [ "$NEW_CHAT" = "true" ]; then
   INITIAL_COUNT=0
 else
-  mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
+  mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
   sleep 0.3
+  _mqtt_start=$(date +%s%3N)
   INITIAL_COUNT=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 2>/dev/null < <(
     sleep 0.5
     mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"chatgpt_get_state\",\"tabId\":$TAB_ID,\"id\":\"st_${ID}\",\"ts\":$(date +%s%3N)}"
   ) | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))" 2>/dev/null || echo "0")
+  mqtt_log "get_state" "claude/browser/response" "count=$INITIAL_COUNT" "$(( $(date +%s%3N) - _mqtt_start ))"
 fi
 
 # Send prompt
 EXTRA=",\"tabId\":$TAB_ID"
 [ "$NEW_CHAT" = "true" ] && EXTRA="$EXTRA,\"newChat\":true"
+_mqtt_start=$(date +%s%3N)
 mosquitto_pub -t 'claude/browser/command' \
   -m "{\"action\":\"chatgpt_chat\",\"text\":$(printf '%s' "$TEXT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"id\":\"${ID}\"${EXTRA},\"ts\":$(date +%s%3N)}"
+mqtt_log "chatgpt_chat" "claude/browser/command" "sent" "$(( $(date +%s%3N) - _mqtt_start ))"
 echo "[>] Sent (initial responses: $INITIAL_COUNT)"
 
 # Poll for response
@@ -77,13 +87,15 @@ SECONDS=0
 RESULT=""
 while [ $SECONDS -lt 120 ]; do
   POLL_ID="poll_$(date +%s%3N)"
-  mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
+  mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
   sleep 0.3
+  _mqtt_start=$(date +%s%3N)
   R=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -C 1 -W 6 2>/dev/null < <(
     sleep 0.5
     mosquitto_pub -t 'claude/browser/command' \
       -m "{\"action\":\"chatgpt_get_state\",\"tabId\":$TAB_ID,\"id\":\"${POLL_ID}\",\"ts\":$(date +%s%3N)}"
   ) 2>/dev/null || echo "{}")
+  mqtt_log "poll" "claude/browser/response" "poll_${SECONDS}s" "$(( $(date +%s%3N) - _mqtt_start ))"
   COUNT=$(echo "$R" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))" 2>/dev/null || echo 0)
   LOADING=$(echo "$R" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('loading',False))" 2>/dev/null || echo False)
   if [ "$COUNT" -gt "$INITIAL_COUNT" ] && [ "$LOADING" = "False" ]; then
@@ -106,13 +118,15 @@ if [ -n "$RESULT" ]; then
     while [ $IMG_WAIT -lt 90 ]; do
       # Check if images exist yet
       IMG_CHK_ID="imgchk_${ID}_${IMG_WAIT}"
-      mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
+      mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
       sleep 0.3
+      _mqtt_start=$(date +%s%3N)
       IMG_CHK=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -C 1 -W 6 2>/dev/null < <(
         sleep 0.5
         mosquitto_pub -t 'claude/browser/command' \
           -m "{\"action\":\"chatgpt_get_images\",\"tabId\":$TAB_ID,\"id\":\"${IMG_CHK_ID}\",\"ts\":$(date +%s%3N)}"
       ) 2>/dev/null || echo "{}")
+      mqtt_log "get_images" "claude/browser/response" "check_${IMG_WAIT}s" "$(( $(date +%s%3N) - _mqtt_start ))"
       IMG_COUNT=$(echo "$IMG_CHK" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('count',0))" 2>/dev/null || echo "0")
 
       if [ "$IMG_COUNT" -gt 0 ] 2>/dev/null; then
@@ -120,13 +134,15 @@ if [ -n "$RESULT" ]; then
         sleep 2
         # Download
         DL_CMD_ID="dl_${ID}"
-        mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
+        mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
         sleep 0.5
+        _mqtt_start=$(date +%s%3N)
         DL_RESULT=$(timeout 20 mosquitto_sub -t 'claude/browser/response' -C 1 -W 18 2>/dev/null < <(
           sleep 0.5
           mosquitto_pub -t 'claude/browser/command' \
             -m "{\"action\":\"chatgpt_download_images\",\"prefix\":\"${DL_PREFIX}\",\"tabId\":$TAB_ID,\"id\":\"${DL_CMD_ID}\",\"ts\":$(date +%s%3N)}"
         ) 2>/dev/null || echo "{}")
+        mqtt_log "download" "claude/browser/response" "dl_count=$DL_COUNT" "$(( $(date +%s%3N) - _mqtt_start ))"
         DL_COUNT=$(echo "$DL_RESULT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('downloaded',0))" 2>/dev/null || echo "0")
         if [ "$DL_COUNT" -gt 0 ] 2>/dev/null; then
           echo "[OK] Downloaded $DL_COUNT image(s) to Windows Downloads"
@@ -153,13 +169,15 @@ if [ -n "$RESULT" ]; then
       echo "[~] Cleaning up ChatGPT conversation..."
       sleep 1
       DEL_CMD_ID="del_${ID}"
-      mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
+      mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
       sleep 0.3
+      _mqtt_start=$(date +%s%3N)
       DEL_RESULT=$(timeout 10 mosquitto_sub -t 'claude/browser/response' -C 1 -W 8 2>/dev/null < <(
         sleep 0.5
         mosquitto_pub -t 'claude/browser/command' \
           -m "{\"action\":\"chatgpt_delete_chat\",\"tabId\":$TAB_ID,\"id\":\"${DEL_CMD_ID}\",\"ts\":$(date +%s%3N)}"
       ) 2>/dev/null || echo "{}")
+      mqtt_log "delete_chat" "claude/browser/response" "$DEL_OK" "$(( $(date +%s%3N) - _mqtt_start ))"
       DEL_OK=$(echo "$DEL_RESULT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('ok' if d.get('success') else d.get('error','unknown'))" 2>/dev/null || echo "failed")
       if [ "$DEL_OK" = "ok" ]; then
         echo "[OK] Conversation deleted"
