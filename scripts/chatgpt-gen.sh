@@ -97,30 +97,46 @@ if [ -n "$RESULT" ]; then
   echo "[OK] $RESULT"
 
   if [ -n "$DL_PREFIX" ]; then
-    # DALL-E images take longer to render
-    echo "[~] Waiting 15s for DALL-E image render..."
-    sleep 15
-
-    # Retry download up to 3 times
+    # DALL-E images take longer — poll for images (up to 90s)
+    echo "[~] Waiting for DALL-E image to appear..."
     DL_OK=false
-    for attempt in 1 2 3; do
-      DL_CMD_ID="dl_${ID}_${attempt}"
+    IMG_WAIT=0
+    while [ $IMG_WAIT -lt 90 ]; do
+      # Check if images exist yet
+      IMG_CHK_ID="imgchk_${ID}_${IMG_WAIT}"
       mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
-      sleep 0.5
-      DL_RESULT=$(timeout 15 mosquitto_sub -t 'claude/browser/response' -C 1 -W 12 2>/dev/null < <(
+      sleep 0.3
+      IMG_CHK=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -C 1 -W 6 2>/dev/null < <(
         sleep 0.5
         mosquitto_pub -t 'claude/browser/command' \
-          -m "{\"action\":\"chatgpt_download_images\",\"prefix\":\"${DL_PREFIX}\",\"tabId\":$TAB_ID,\"id\":\"${DL_CMD_ID}\",\"ts\":$(date +%s%3N)}"
+          -m "{\"action\":\"chatgpt_get_images\",\"tabId\":$TAB_ID,\"id\":\"${IMG_CHK_ID}\",\"ts\":$(date +%s%3N)}"
       ) 2>/dev/null || echo "{}")
-      DL_COUNT=$(echo "$DL_RESULT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('downloaded',0))" 2>/dev/null || echo "0")
-      if [ "$DL_COUNT" -gt 0 ] 2>/dev/null; then
-        echo "[OK] Downloaded $DL_COUNT image(s) to Windows Downloads"
-        echo "[!] Files land in /mnt/c/Users/\$USER/Downloads/"
-        DL_OK=true
+      IMG_COUNT=$(echo "$IMG_CHK" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('count',0))" 2>/dev/null || echo "0")
+
+      if [ "$IMG_COUNT" -gt 0 ] 2>/dev/null; then
+        echo "[~] Found $IMG_COUNT image(s), downloading..."
+        sleep 2
+        # Download
+        DL_CMD_ID="dl_${ID}"
+        mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
+        sleep 0.5
+        DL_RESULT=$(timeout 20 mosquitto_sub -t 'claude/browser/response' -C 1 -W 18 2>/dev/null < <(
+          sleep 0.5
+          mosquitto_pub -t 'claude/browser/command' \
+            -m "{\"action\":\"chatgpt_download_images\",\"prefix\":\"${DL_PREFIX}\",\"tabId\":$TAB_ID,\"id\":\"${DL_CMD_ID}\",\"ts\":$(date +%s%3N)}"
+        ) 2>/dev/null || echo "{}")
+        DL_COUNT=$(echo "$DL_RESULT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('downloaded',0))" 2>/dev/null || echo "0")
+        if [ "$DL_COUNT" -gt 0 ] 2>/dev/null; then
+          echo "[OK] Downloaded $DL_COUNT image(s) to Windows Downloads"
+          echo "[!] Files land in /mnt/c/Users/\$USER/Downloads/"
+          DL_OK=true
+        fi
         break
       fi
-      echo "[~] No images yet (attempt $attempt/3), waiting 5s..."
+
+      printf "(%ds · waiting for DALL-E · timeout 90s)\r" "$IMG_WAIT" >&2
       sleep 5
+      IMG_WAIT=$((IMG_WAIT + 5))
     done
 
     if [ "$DL_OK" != "true" ]; then
