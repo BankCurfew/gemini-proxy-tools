@@ -35,13 +35,25 @@ fi
 
 echo ""
 
-# Gemini tab
-STATE=$(mosquitto_sub -t 'claude/browser/state' -C 1 -W 3 2>/dev/null || echo '{}')
-RESP_COUNT=$(echo "$STATE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount','N/A'))" 2>/dev/null || echo "N/A")
-LOADING=$(echo "$STATE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('loading','N/A'))" 2>/dev/null || echo "N/A")
+# Gemini tab — use list_tabs (live) instead of retained state topic (stale)
+mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
+sleep 0.3
+TABS_RESULT=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -C 1 -W 6 2>/dev/null < <(
+  sleep 0.5
+  mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"list_tabs\",\"id\":\"status_$(date +%s)\",\"ts\":$(date +%s%3N)}"
+) 2>/dev/null || echo '{}')
+TAB_COUNT=$(echo "$TABS_RESULT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('count',0))" 2>/dev/null || echo "0")
+TAB_INFO=$(echo "$TABS_RESULT" | python3 -c "
+import sys,json
+d = json.loads(sys.stdin.read())
+tabs = d.get('tabs', [])
+for t in tabs:
+    print(f\"  tab:{t.get('id','?')} — {t.get('title','?')[:50]}\")
+" 2>/dev/null || echo "")
 
-if [ "$RESP_COUNT" != "N/A" ]; then
-  echo "[OK] Gemini Tab: detected (responses: $RESP_COUNT, loading: $LOADING)"
+if [ "$TAB_COUNT" -gt 0 ] 2>/dev/null; then
+  echo "[OK] Gemini Tab: $TAB_COUNT tab(s) detected"
+  echo "$TAB_INFO"
 else
   echo "[!!] Gemini Tab: not detected"
   echo "     Fix: Open gemini.google.com in Chrome"

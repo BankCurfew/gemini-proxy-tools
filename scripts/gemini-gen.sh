@@ -131,6 +131,24 @@ if [ -n "$RESULT" ]; then
       echo "[!] No images found — Gemini may have responded with text only"
       exit 1
     fi
+
+    # Auto-delete the conversation to keep sidebar clean
+    echo "[~] Cleaning up Gemini conversation..."
+    sleep 1
+    DEL_CMD_ID="del_${ID}"
+    mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
+    sleep 0.3
+    DEL_RESULT=$(timeout 10 mosquitto_sub -t 'claude/browser/response' -C 1 -W 8 2>/dev/null < <(
+      sleep 0.5
+      mosquitto_pub -t 'claude/browser/command' \
+        -m "{\"action\":\"delete_chat\",\"tabId\":$TAB_ID,\"id\":\"${DEL_CMD_ID}\",\"ts\":$(date +%s%3N)}"
+    ) 2>/dev/null || echo "{}")
+    DEL_OK=$(echo "$DEL_RESULT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('ok' if d.get('success') else d.get('error','unknown'))" 2>/dev/null || echo "failed")
+    if [ "$DEL_OK" = "ok" ]; then
+      echo "[OK] Conversation deleted"
+    else
+      echo "[~] Auto-delete skipped ($DEL_OK) — manual cleanup may be needed"
+    fi
   fi
   exit 0
 else
