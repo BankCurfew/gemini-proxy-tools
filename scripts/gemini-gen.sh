@@ -1,18 +1,20 @@
 #!/bin/bash
 # gemini-gen.sh — Generate image via Gemini (pinned to one tab)
-# Usage: ./gemini-gen.sh "prompt" [--tab ID] [--new] [--download prefix]
+# Usage: ./gemini-gen.sh "prompt" [--tab ID] [--new] [--download prefix] [--keep]
 # Default: pins to active Gemini tab and reuses it for all requests.
 
 set -euo pipefail
 
-TEXT="${1:?Usage: gemini-gen.sh \"prompt\" [--tab ID] [--new] [--download prefix]}"
+TEXT="${1:?Usage: gemini-gen.sh \"prompt\" [--tab ID] [--new] [--download prefix] [--keep]}"
 shift
 NEW_CHAT=false
 DL_PREFIX=""
 TAB_ID=""
+KEEP_CHAT=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --new) NEW_CHAT=true; shift;;
+    --keep) KEEP_CHAT=true; shift;;
     --tab) TAB_ID="$2"; shift 2;;
     --download) DL_PREFIX="${2:-gemini}"; shift 2;;
     *) shift;;
@@ -132,22 +134,26 @@ if [ -n "$RESULT" ]; then
       exit 1
     fi
 
-    # Auto-delete the conversation to keep sidebar clean
-    echo "[~] Cleaning up Gemini conversation..."
-    sleep 1
-    DEL_CMD_ID="del_${ID}"
-    mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
-    sleep 0.3
-    DEL_RESULT=$(timeout 10 mosquitto_sub -t 'claude/browser/response' -C 1 -W 8 2>/dev/null < <(
-      sleep 0.5
-      mosquitto_pub -t 'claude/browser/command' \
-        -m "{\"action\":\"delete_chat\",\"tabId\":$TAB_ID,\"id\":\"${DEL_CMD_ID}\",\"ts\":$(date +%s%3N)}"
-    ) 2>/dev/null || echo "{}")
-    DEL_OK=$(echo "$DEL_RESULT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('ok' if d.get('success') else d.get('error','unknown'))" 2>/dev/null || echo "failed")
-    if [ "$DEL_OK" = "ok" ]; then
-      echo "[OK] Conversation deleted"
+    # Auto-delete the conversation to keep sidebar clean (unless --keep)
+    if [ "$KEEP_CHAT" = "true" ]; then
+      echo "[~] Keeping conversation (--keep)"
     else
-      echo "[~] Auto-delete skipped ($DEL_OK) — manual cleanup may be needed"
+      echo "[~] Cleaning up Gemini conversation..."
+      sleep 1
+      DEL_CMD_ID="del_${ID}"
+      mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
+      sleep 0.3
+      DEL_RESULT=$(timeout 10 mosquitto_sub -t 'claude/browser/response' -C 1 -W 8 2>/dev/null < <(
+        sleep 0.5
+        mosquitto_pub -t 'claude/browser/command' \
+          -m "{\"action\":\"delete_chat\",\"tabId\":$TAB_ID,\"id\":\"${DEL_CMD_ID}\",\"ts\":$(date +%s%3N)}"
+      ) 2>/dev/null || echo "{}")
+      DEL_OK=$(echo "$DEL_RESULT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('ok' if d.get('success') else d.get('error','unknown'))" 2>/dev/null || echo "failed")
+      if [ "$DEL_OK" = "ok" ]; then
+        echo "[OK] Conversation deleted"
+      else
+        echo "[~] Auto-delete skipped ($DEL_OK) — manual cleanup may be needed"
+      fi
     fi
   fi
   exit 0
