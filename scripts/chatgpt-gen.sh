@@ -150,10 +150,10 @@ if [ -n "$RESULT" ]; then
         DL_RESULT=$(timeout 20 mosquitto_sub -t 'claude/browser/response' -C 1 -W 18 2>/dev/null < <(
           sleep 0.5
           mosquitto_pub -t 'claude/browser/command' \
-            -m "{\"action\":\"chatgpt_download_images\",\"prefix\":\"${DL_PREFIX}\",\"tabId\":$TAB_ID,\"id\":\"${DL_CMD_ID}\",\"ts\":$(date +%s%3N)}"
+            -m "{\"action\":\"chatgpt_download_images\",\"prefix\":\"${DL_PREFIX}\",\"latest\":true,\"tabId\":$TAB_ID,\"id\":\"${DL_CMD_ID}\",\"ts\":$(date +%s%3N)}"
         ) 2>/dev/null || echo "{}")
-        mqtt_log "download" "claude/browser/response" "dl_count=$DL_COUNT" "$(( $(date +%s%3N) - _mqtt_start ))"
         DL_COUNT=$(echo "$DL_RESULT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('downloaded',0))" 2>/dev/null || echo "0")
+        mqtt_log "download" "claude/browser/response" "dl_count=$DL_COUNT" "$(( $(date +%s%3N) - _mqtt_start ))"
         if [ "$DL_COUNT" -gt 0 ] 2>/dev/null; then
           echo "[OK] Downloaded $DL_COUNT image(s) to Windows Downloads"
           echo "[!] Files land in /mnt/c/Users/\$USER/Downloads/"
@@ -187,8 +187,8 @@ if [ -n "$RESULT" ]; then
         mosquitto_pub -t 'claude/browser/command' \
           -m "{\"action\":\"chatgpt_delete_chat\",\"tabId\":$TAB_ID,\"id\":\"${DEL_CMD_ID}\",\"ts\":$(date +%s%3N)}"
       ) 2>/dev/null || echo "{}")
-      mqtt_log "delete_chat" "claude/browser/response" "$DEL_OK" "$(( $(date +%s%3N) - _mqtt_start ))"
       DEL_OK=$(echo "$DEL_RESULT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('ok' if d.get('success') else d.get('error','unknown'))" 2>/dev/null || echo "failed")
+      mqtt_log "delete_chat" "claude/browser/response" "$DEL_OK" "$(( $(date +%s%3N) - _mqtt_start ))"
       if [ "$DEL_OK" = "ok" ]; then
         echo "[OK] Conversation deleted"
       else
