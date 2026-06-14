@@ -36,12 +36,23 @@ fi
 echo ""
 
 # Gemini tab — use list_tabs (live) instead of retained state topic (stale)
-mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
-sleep 0.3
-TABS_RESULT=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -C 1 -W 6 2>/dev/null < <(
-  sleep 0.5
-  mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"list_tabs\",\"id\":\"status_$(date +%s)\",\"ts\":$(date +%s%3N)}"
-) 2>/dev/null || echo '{}')
+# Race-condition fix (#7): increased sub→pub delay + retry
+_status_ping() {
+  local sid="$1" delay="$2"
+  mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
+  sleep 0.3
+  TABS_RESULT=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -C 1 -W 6 2>/dev/null < <(
+    sleep "$delay"
+    mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"list_tabs\",\"id\":\"${sid}\",\"ts\":$(date +%s%3N)}"
+  ) 2>/dev/null || echo '{}')
+}
+_status_ping "status_$(date +%s)" 1
+TAB_COUNT=$(echo "$TABS_RESULT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('count',0))" 2>/dev/null || echo "0")
+if ! [ "$TAB_COUNT" -gt 0 ] 2>/dev/null; then
+  echo "[~] Tab check missed — retrying..."
+  sleep 1
+  _status_ping "status_$(date +%s)_retry" 1.5
+fi
 TAB_COUNT=$(echo "$TABS_RESULT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('count',0))" 2>/dev/null || echo "0")
 TAB_INFO=$(echo "$TABS_RESULT" | python3 -c "
 import sys,json

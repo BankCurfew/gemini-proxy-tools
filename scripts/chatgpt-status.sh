@@ -30,12 +30,24 @@ fi
 echo ""
 
 # ChatGPT tab — use list_tabs (live)
-mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
-sleep 0.3
-TABS_RESULT=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -C 1 -W 6 2>/dev/null < <(
-  sleep 0.5
-  mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"list_tabs\",\"id\":\"status_$(date +%s)\",\"ts\":$(date +%s%3N)}"
-) 2>/dev/null || echo '{}')
+# Race-condition fix (#7): increased sub→pub delay + retry
+_status_ping() {
+  local sid="$1" delay="$2"
+  mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
+  sleep 0.3
+  TABS_RESULT=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -C 1 -W 6 2>/dev/null < <(
+    sleep "$delay"
+    mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"list_tabs\",\"id\":\"${sid}\",\"ts\":$(date +%s%3N)}"
+  ) 2>/dev/null || echo '{}')
+}
+_status_ping "status_$(date +%s)" 1
+# Retry once if empty (race condition: sub not ready before pub)
+_tab_ok=$(echo "$TABS_RESULT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('ok' if d.get('tabs') else 'empty')" 2>/dev/null || echo "empty")
+if [ "$_tab_ok" != "ok" ]; then
+  echo "[~] Tab check missed — retrying..."
+  sleep 1
+  _status_ping "status_$(date +%s)_retry" 1.5
+fi
 
 echo "$TABS_RESULT" | python3 -c "
 import sys, json

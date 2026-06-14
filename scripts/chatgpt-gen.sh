@@ -28,18 +28,28 @@ done
 ID="cgpt_$(date +%s)"
 
 # Pre-flight: ping extension
-mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
-sleep 0.3
-_mqtt_start=$(date +%s%3N)
-PING=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 2>/dev/null < <(
-  sleep 0.5
-  mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"list_tabs\",\"id\":\"ping_${ID}\",\"ts\":$(date +%s%3N)}"
-) 2>/dev/null || echo '{}')
-mqtt_log "ping" "claude/browser/response" "$([ -n "$PING" ] && echo ok || echo empty)" "$(( $(date +%s%3N) - _mqtt_start ))"
-PING_OK=$(echo "$PING" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('ok' if d.get('success') else 'fail')" 2>/dev/null || echo "fail")
+# Race-condition fix (#7): retry once if sub isn't established before pub fires
+_ping_attempt() {
+  local attempt_id="$1" delay="$2"
+  mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
+  sleep 0.3
+  _mqtt_start=$(date +%s%3N)
+  PING=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 2>/dev/null < <(
+    sleep "$delay"
+    mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"list_tabs\",\"id\":\"${attempt_id}\",\"ts\":$(date +%s%3N)}"
+  ) 2>/dev/null || echo '{}')
+  mqtt_log "ping" "claude/browser/response" "$([ -n "$PING" ] && echo ok || echo empty)" "$(( $(date +%s%3N) - _mqtt_start ))"
+  PING_OK=$(echo "$PING" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('ok' if d.get('success') else 'fail')" 2>/dev/null || echo "fail")
+}
+_ping_attempt "ping_${ID}" 1
 if [ "$PING_OK" != "ok" ]; then
-  echo "[!] Extension offline — reload at chrome://extensions/ then retry"
-  exit 1
+  echo "[~] Ping missed — retrying..." >&2
+  sleep 1
+  _ping_attempt "ping_${ID}_retry" 1.5
+  if [ "$PING_OK" != "ok" ]; then
+    echo "[!] Extension offline — reload at chrome://extensions/ then retry"
+    exit 1
+  fi
 fi
 echo "[ext:online]"
 
@@ -67,7 +77,7 @@ else
   sleep 0.3
   _mqtt_start=$(date +%s%3N)
   INITIAL_COUNT=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 2>/dev/null < <(
-    sleep 0.5
+    sleep 1
     mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"chatgpt_get_state\",\"tabId\":$TAB_ID,\"id\":\"st_${ID}\",\"ts\":$(date +%s%3N)}"
   ) | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))" 2>/dev/null || echo "0")
   mqtt_log "get_state" "claude/browser/response" "count=$INITIAL_COUNT" "$(( $(date +%s%3N) - _mqtt_start ))"
@@ -91,7 +101,7 @@ while [ $SECONDS -lt 120 ]; do
   sleep 0.3
   _mqtt_start=$(date +%s%3N)
   R=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -C 1 -W 6 2>/dev/null < <(
-    sleep 0.5
+    sleep 1
     mosquitto_pub -t 'claude/browser/command' \
       -m "{\"action\":\"chatgpt_get_state\",\"tabId\":$TAB_ID,\"id\":\"${POLL_ID}\",\"ts\":$(date +%s%3N)}"
   ) 2>/dev/null || echo "{}")
