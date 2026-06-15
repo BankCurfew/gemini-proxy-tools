@@ -105,10 +105,21 @@ if [ "$UPLOAD_OK" = "ok" ]; then
   # Send follow-up chat message if provided
   if [ -n "$CHAT_MSG" ]; then
     echo "[>] Sending message: ${CHAT_MSG:0:50}..."
-    sleep 1
-    mosquitto_pub -t 'claude/browser/command' \
-      -m "{\"action\":\"chatgpt_chat\",\"text\":$(printf '%s' "$CHAT_MSG" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"tabId\":$TAB_ID,\"id\":\"chat_${ID}\",\"ts\":$(date +%s%3N)}"
-    echo "[OK] Message sent with attached file"
+    sleep 2  # wait for file to finish processing before typing
+    mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
+    sleep 0.3
+    CHAT_RESULT=$(timeout 15 mosquitto_sub -t 'claude/browser/response' -C 1 -W 12 2>/dev/null < <(
+      sleep 1
+      mosquitto_pub -t 'claude/browser/command' \
+        -m "{\"action\":\"chatgpt_chat\",\"text\":$(printf '%s' "$CHAT_MSG" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"tabId\":$TAB_ID,\"id\":\"chat_${ID}\",\"ts\":$(date +%s%3N)}"
+    ) 2>/dev/null || echo '{}')
+    CHAT_OK=$(echo "$CHAT_RESULT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('ok' if d.get('success') else d.get('error','unknown'))" 2>/dev/null || echo "unknown")
+    CHAT_METHOD=$(echo "$CHAT_RESULT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('method','?'))" 2>/dev/null || echo "?")
+    if [ "$CHAT_OK" = "ok" ]; then
+      echo "[OK] Message sent with attached file (method: $CHAT_METHOD)"
+    else
+      echo "[!] Message may not have sent: $CHAT_OK — check browser"
+    fi
   else
     echo "[~] File attached — type your message in ChatGPT to send with the image"
   fi
