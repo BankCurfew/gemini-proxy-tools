@@ -121,6 +121,19 @@ if [ -n "$RESULT" ]; then
   echo "[OK] $RESULT"
 
   if [ -n "$DL_PREFIX" ]; then
+    # Check for DALL-E guardrail refusal before polling for images
+    RESP_TEXT=$(echo "$R" | python3 -c "
+import sys,json
+d=json.loads(sys.stdin.read())
+text = d.get('lastResponse','') or d.get('responseText','') or ''
+print(text[:500])
+" 2>/dev/null || echo "")
+    if echo "$RESP_TEXT" | grep -qiE '(violate.*guardrail|content policy|cannot generate|unable to create|I can.t create|not able to generate|against.*policy|image generation.*blocked|declined to generate)'; then
+      echo "[!] DALL-E REFUSED — guardrail violation detected"
+      echo "[!] Response: ${RESP_TEXT:0:200}"
+      exit 1
+    fi
+
     # DALL-E images take longer — poll for images (up to 90s)
     echo "[~] Waiting for DALL-E image to appear..."
     DL_OK=false
@@ -162,13 +175,36 @@ if [ -n "$RESULT" ]; then
         break
       fi
 
+      # After 30s with no images, check response text for guardrail refusal
+      if [ "$IMG_WAIT" -eq 30 ]; then
+        GR_CHK_ID="grchk_${ID}"
+        mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
+        sleep 0.3
+        GR_RESP=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -C 1 -W 6 2>/dev/null < <(
+          sleep 0.5
+          mosquitto_pub -t 'claude/browser/command' \
+            -m "{\"action\":\"chatgpt_get_state\",\"tabId\":$TAB_ID,\"id\":\"${GR_CHK_ID}\",\"ts\":$(date +%s%3N)}"
+        ) 2>/dev/null || echo "{}")
+        GR_TEXT=$(echo "$GR_RESP" | python3 -c "
+import sys,json
+d=json.loads(sys.stdin.read())
+print(d.get('lastResponse','') or d.get('responseText','') or '')
+" 2>/dev/null || echo "")
+        if echo "$GR_TEXT" | grep -qiE '(violate.*guardrail|content policy|cannot generate|unable to create|I can.t create|not able to generate|against.*policy|image generation.*blocked|declined to generate|similarity to third-party)'; then
+          echo ""
+          echo "[!] DALL-E REFUSED — guardrail violation detected at 30s check"
+          echo "[!] Response: ${GR_TEXT:0:200}"
+          exit 1
+        fi
+      fi
+
       printf "(%ds · waiting for DALL-E · timeout 90s)\r" "$IMG_WAIT" >&2
       sleep 5
       IMG_WAIT=$((IMG_WAIT + 5))
     done
 
     if [ "$DL_OK" != "true" ]; then
-      echo "[!] No images found — ChatGPT may have responded with text only"
+      echo "[!] No images found after 90s — DALL-E may have refused or responded with text only"
       exit 1
     fi
 
