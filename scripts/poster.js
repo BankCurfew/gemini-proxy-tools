@@ -124,68 +124,56 @@ async function waitForImage(page, timeoutMs = 180000) {
 }
 
 async function downloadImage(page, prefix) {
-  // Find the latest DALL-E image
-  const imgSrc = await page.evaluate(() => {
-    const imgs = Array.from(document.querySelectorAll('img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"]'));
-    if (!imgs.length) return null;
-    const latest = imgs[imgs.length - 1];
-    return latest.src;
-  });
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const dest = path.join(OUTPUT_DIR, `${prefix || 'poster'}-${dateStr}.png`);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
 
-  if (!imgSrc) {
-    console.error('ERROR: No DALL-E image found');
-    return null;
+  // Method 1: Extract image src and download via CDP fetch
+  try {
+    const imgData = await page.evaluate(() => {
+      const imgs = Array.from(document.querySelectorAll('img'));
+      // Find DALL-E images: large images in assistant messages
+      const dalleImgs = imgs.filter(img => {
+        const w = img.naturalWidth || img.width;
+        const src = img.src || '';
+        return w > 500 && (src.includes('oaidalleapi') || src.includes('blob:') || img.alt?.includes('Generated'));
+      });
+      if (!dalleImgs.length) return null;
+      const latest = dalleImgs[dalleImgs.length - 1];
+      // Convert to base64 via canvas
+      const canvas = document.createElement('canvas');
+      canvas.width = latest.naturalWidth;
+      canvas.height = latest.naturalHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(latest, 0, 0);
+      return canvas.toDataURL('image/png').split(',')[1];
+    });
+
+    if (imgData) {
+      fs.writeFileSync(dest, Buffer.from(imgData, 'base64'));
+      console.log(`SAVED: ${dest} (${Math.round(fs.statSync(dest).size / 1024)}KB)`);
+      return dest;
+    }
+  } catch (e) {
+    console.log('Canvas method failed:', e.message);
   }
 
-  // Try clicking the ChatGPT download button
-  const downloaded = await page.evaluate(() => {
-    const imgs = Array.from(document.querySelectorAll('img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"]'));
-    if (!imgs.length) return false;
-    const latest = imgs[imgs.length - 1];
-    // Find download button near the image
-    const container = latest.closest('[data-message-author-role="assistant"]') || latest.parentElement?.parentElement;
-    if (container) {
-      const dlBtn = container.querySelector('button[aria-label*="Download"], a[download], button[data-testid*="download"]');
-      if (dlBtn) { dlBtn.click(); return true; }
-    }
-    return false;
-  });
-
-  if (downloaded) {
-    console.log('Download clicked. Check Downloads folder.');
-    await sleep(3000);
-
-    // Find latest download
-    if (fs.existsSync(DOWNLOADS_DIR)) {
-      const files = fs.readdirSync(DOWNLOADS_DIR)
-        .filter(f => f.endsWith('.png') || f.endsWith('.webp'))
-        .map(f => ({ name: f, time: fs.statSync(path.join(DOWNLOADS_DIR, f)).mtimeMs }))
-        .sort((a, b) => b.time - a.time);
-
-      if (files.length > 0 && Date.now() - files[0].time < 10000) {
-        const src = path.join(DOWNLOADS_DIR, files[0].name);
-        const dateStr = new Date().toISOString().slice(0, 10);
-        const dest = path.join(OUTPUT_DIR, `${prefix || 'poster'}-${dateStr}.png`);
-        fs.mkdirSync(path.dirname(dest), { recursive: true });
-        fs.copyFileSync(src, dest);
-        console.log(`SAVED: ${dest}`);
+  // Method 2: Screenshot the image element
+  try {
+    const imgs = await page.$$('img');
+    for (let i = imgs.length - 1; i >= 0; i--) {
+      const box = await imgs[i].boundingBox();
+      if (box && box.width > 300 && box.height > 300) {
+        await imgs[i].screenshot({ path: dest });
+        console.log(`SCREENSHOT: ${dest} (${Math.round(fs.statSync(dest).size / 1024)}KB)`);
         return dest;
       }
     }
+  } catch (e) {
+    console.log('Screenshot method failed:', e.message);
   }
 
-  // Fallback: screenshot the image element
-  console.log('Download button not found. Taking screenshot of image...');
-  const imgElement = await page.$('img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"]:last-of-type');
-  if (imgElement) {
-    const dateStr = new Date().toISOString().slice(0, 10);
-    const dest = path.join(OUTPUT_DIR, `${prefix || 'poster'}-${dateStr}.png`);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    await imgElement.screenshot({ path: dest });
-    console.log(`SCREENSHOT: ${dest}`);
-    return dest;
-  }
-
+  console.error('ERROR: No downloadable DALL-E image found');
   return null;
 }
 
