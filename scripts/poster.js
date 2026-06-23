@@ -234,14 +234,23 @@ async function generate(page, type, brief) {
       .replace('{SOURCE}', 'iAgencyAIA');
   }
 
+  // Count images before generation
+  const beforeCount = (await listImages(page)).length;
+
   console.log(`Generating ${type} poster...`);
   const sent = await sendPrompt(page, prompt);
-  if (!sent) return;
+  if (!sent) return null;
 
   const found = await waitForImage(page);
   if (found) {
-    console.log('\nImage ready. Download with: node poster.js download ' + type);
+    // Auto-download the new image
+    const afterImgs = await listImages(page);
+    const newIdx = afterImgs.length - 1;
+    console.log(`\nAuto-downloading image [${newIdx}]...`);
+    const dest = await downloadImage(page, type, newIdx);
+    return dest;
   }
+  return null;
 }
 
 async function status(page) {
