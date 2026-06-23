@@ -126,12 +126,13 @@ async function waitForImage(page, timeoutMs = 180000) {
 async function listImages(page) {
   const imgs = await page.evaluate(() => {
     return Array.from(document.querySelectorAll('img')).map((img, i) => ({
-      idx: i,
+      globalIdx: i,
       w: img.naturalWidth || img.width,
       h: img.naturalHeight || img.height,
       alt: (img.alt || '').substring(0, 50),
-      src: (img.src || '').substring(0, 60)
-    })).filter(img => img.w > 300 && img.h > 300);
+      src: (img.src || '').substring(0, 80),
+      hasAlt: !!(img.alt && img.alt.startsWith('Generated'))
+    })).filter(img => img.w > 300 && img.h > 300 && img.hasAlt);
   });
   return imgs;
 }
@@ -162,19 +163,35 @@ async function downloadImage(page, prefix, indexArg) {
 
   console.log(`Downloading image [${targetIdx}] ${target.w}x${target.h}...`);
 
-  // Method 1: Canvas base64 extraction
+  const globalIdx = target.globalIdx;
+
+  // Method 1: Scroll to image + screenshot element (most reliable for cross-origin)
   try {
-    const imgData = await page.evaluate((globalIdx) => {
-      const imgs = Array.from(document.querySelectorAll('img'));
-      const big = imgs.filter(img => (img.naturalWidth || img.width) > 300 && (img.naturalHeight || img.height) > 300);
-      const img = big[globalIdx];
+    const allImgs = await page.$$('img');
+    if (allImgs[globalIdx]) {
+      await allImgs[globalIdx].scrollIntoView();
+      await sleep(500);
+      await allImgs[globalIdx].screenshot({ path: dest });
+      const size = Math.round(fs.statSync(dest).size / 1024);
+      console.log(`SAVED: ${dest} (${size}KB) [${targetIdx + 1}/${dalleImgs.length}]`);
+      return dest;
+    }
+  } catch (e) {
+    console.log('Screenshot failed:', e.message);
+  }
+
+  // Method 2: Canvas fallback (may fail on cross-origin)
+  try {
+    const imgData = await page.evaluate((gIdx) => {
+      const img = document.querySelectorAll('img')[gIdx];
       if (!img) return null;
       const canvas = document.createElement('canvas');
       canvas.width = img.naturalWidth;
       canvas.height = img.naturalHeight;
       canvas.getContext('2d').drawImage(img, 0, 0);
-      return canvas.toDataURL('image/png').split(',')[1];
-    }, targetIdx);
+      try { return canvas.toDataURL('image/png').split(',')[1]; }
+      catch { return null; }
+    }, globalIdx);
 
     if (imgData) {
       fs.writeFileSync(dest, Buffer.from(imgData, 'base64'));
@@ -183,23 +200,6 @@ async function downloadImage(page, prefix, indexArg) {
     }
   } catch (e) {
     console.log('Canvas failed:', e.message);
-  }
-
-  // Method 2: Screenshot fallback
-  try {
-    const allImgs = await page.$$('img');
-    const bigImgs = [];
-    for (const img of allImgs) {
-      const box = await img.boundingBox();
-      if (box && box.width > 300 && box.height > 300) bigImgs.push(img);
-    }
-    if (bigImgs[targetIdx]) {
-      await bigImgs[targetIdx].screenshot({ path: dest });
-      console.log(`SCREENSHOT: ${dest} (${Math.round(fs.statSync(dest).size / 1024)}KB) [${targetIdx + 1}/${dalleImgs.length}]`);
-      return dest;
-    }
-  } catch (e) {
-    console.log('Screenshot failed:', e.message);
   }
 
   console.error('ERROR: Download failed for image', targetIdx);
