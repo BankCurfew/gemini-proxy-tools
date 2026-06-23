@@ -34,7 +34,7 @@ Light theme. 9:16 vertical. Generate now.`;
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function connect() {
-  const browser = await puppeteer.connect({ browserURL: 'http://localhost:9222', defaultViewport: null });
+  const browser = await puppeteer.connect({ browserURL: 'http://localhost:9222', defaultViewport: null, protocolTimeout: 120000 });
   const pages = await browser.pages();
   // Find brand chat tab, or any ChatGPT tab, or open brand chat
   let page = pages.find(p => p.url().includes(BRAND_CHAT_ID));
