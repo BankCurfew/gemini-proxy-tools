@@ -8,6 +8,8 @@ const fs = require('fs');
 const path = require('path');
 
 const CHATGPT_URL = 'https://chatgpt.com';
+const BRAND_CHAT_ID = '6a2e2fee-f228-83ec-a55a-e85f221d620f';
+const BRAND_CHAT_URL = `https://chatgpt.com/c/${BRAND_CHAT_ID}`;
 const OUTPUT_DIR = '/mnt/c/Users/mbank/OneDrive/AIA/Posters';
 const DOWNLOADS_DIR = '/mnt/c/Users/mbank/Downloads';
 
@@ -34,12 +36,19 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 async function connect() {
   const browser = await puppeteer.connect({ browserURL: 'http://localhost:9222', defaultViewport: null });
   const pages = await browser.pages();
-  let page = pages.find(p => p.url().includes('chatgpt.com'));
+  // Find brand chat tab, or any ChatGPT tab, or open brand chat
+  let page = pages.find(p => p.url().includes(BRAND_CHAT_ID));
+  if (!page) page = pages.find(p => p.url().includes('chatgpt.com/c/'));
+  if (!page) page = pages.find(p => p.url().includes('chatgpt.com'));
 
   if (!page) {
-    console.log('No ChatGPT tab found. Opening...');
+    console.log('No ChatGPT tab found. Opening brand chat...');
     page = await browser.newPage();
-    await page.goto(CHATGPT_URL, { waitUntil: 'networkidle2' });
+    await page.goto(BRAND_CHAT_URL, { waitUntil: 'networkidle2' });
+    await sleep(3000);
+  } else if (!page.url().includes(BRAND_CHAT_ID)) {
+    console.log('ChatGPT tab found but not brand chat. Navigating...');
+    await page.goto(BRAND_CHAT_URL, { waitUntil: 'networkidle2' });
     await sleep(3000);
   }
 
