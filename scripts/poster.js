@@ -123,58 +123,97 @@ async function waitForImage(page, timeoutMs = 180000) {
   return false;
 }
 
-async function downloadImage(page, prefix) {
+async function listImages(page) {
+  const imgs = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll('img')).map((img, i) => ({
+      idx: i,
+      w: img.naturalWidth || img.width,
+      h: img.naturalHeight || img.height,
+      alt: (img.alt || '').substring(0, 50),
+      src: (img.src || '').substring(0, 60)
+    })).filter(img => img.w > 300 && img.h > 300);
+  });
+  return imgs;
+}
+
+async function downloadImage(page, prefix, indexArg) {
   const dateStr = new Date().toISOString().slice(0, 10);
-  const dest = path.join(OUTPUT_DIR, `${prefix || 'poster'}-${dateStr}.png`);
+
+  // List all DALL-E images
+  const dalleImgs = await listImages(page);
+  if (!dalleImgs.length) {
+    console.error('ERROR: No large images found');
+    return null;
+  }
+
+  // If no index specified, show list and download latest
+  const targetIdx = indexArg !== undefined ? parseInt(indexArg) : dalleImgs.length - 1;
+
+  if (targetIdx < 0 || targetIdx >= dalleImgs.length) {
+    console.error(`ERROR: index ${targetIdx} out of range (0-${dalleImgs.length - 1})`);
+    dalleImgs.forEach((img, i) => console.log(`  [${i}] ${img.w}x${img.h} ${img.alt || img.src}`));
+    return null;
+  }
+
+  const target = dalleImgs[targetIdx];
+  const suffix = dalleImgs.length > 1 ? `-${targetIdx + 1}of${dalleImgs.length}` : '';
+  const dest = path.join(OUTPUT_DIR, `${prefix || 'poster'}-${dateStr}${suffix}.png`);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
 
-  // Method 1: Extract image src and download via CDP fetch
+  console.log(`Downloading image [${targetIdx}] ${target.w}x${target.h}...`);
+
+  // Method 1: Canvas base64 extraction
   try {
-    const imgData = await page.evaluate(() => {
+    const imgData = await page.evaluate((globalIdx) => {
       const imgs = Array.from(document.querySelectorAll('img'));
-      // Find DALL-E images: large images in assistant messages
-      const dalleImgs = imgs.filter(img => {
-        const w = img.naturalWidth || img.width;
-        const src = img.src || '';
-        return w > 500 && (src.includes('oaidalleapi') || src.includes('blob:') || img.alt?.includes('Generated'));
-      });
-      if (!dalleImgs.length) return null;
-      const latest = dalleImgs[dalleImgs.length - 1];
-      // Convert to base64 via canvas
+      const big = imgs.filter(img => (img.naturalWidth || img.width) > 300 && (img.naturalHeight || img.height) > 300);
+      const img = big[globalIdx];
+      if (!img) return null;
       const canvas = document.createElement('canvas');
-      canvas.width = latest.naturalWidth;
-      canvas.height = latest.naturalHeight;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(latest, 0, 0);
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.getContext('2d').drawImage(img, 0, 0);
       return canvas.toDataURL('image/png').split(',')[1];
-    });
+    }, targetIdx);
 
     if (imgData) {
       fs.writeFileSync(dest, Buffer.from(imgData, 'base64'));
-      console.log(`SAVED: ${dest} (${Math.round(fs.statSync(dest).size / 1024)}KB)`);
+      console.log(`SAVED: ${dest} (${Math.round(fs.statSync(dest).size / 1024)}KB) [${targetIdx + 1}/${dalleImgs.length}]`);
       return dest;
     }
   } catch (e) {
-    console.log('Canvas method failed:', e.message);
+    console.log('Canvas failed:', e.message);
   }
 
-  // Method 2: Screenshot the image element
+  // Method 2: Screenshot fallback
   try {
-    const imgs = await page.$$('img');
-    for (let i = imgs.length - 1; i >= 0; i--) {
-      const box = await imgs[i].boundingBox();
-      if (box && box.width > 300 && box.height > 300) {
-        await imgs[i].screenshot({ path: dest });
-        console.log(`SCREENSHOT: ${dest} (${Math.round(fs.statSync(dest).size / 1024)}KB)`);
-        return dest;
-      }
+    const allImgs = await page.$$('img');
+    const bigImgs = [];
+    for (const img of allImgs) {
+      const box = await img.boundingBox();
+      if (box && box.width > 300 && box.height > 300) bigImgs.push(img);
+    }
+    if (bigImgs[targetIdx]) {
+      await bigImgs[targetIdx].screenshot({ path: dest });
+      console.log(`SCREENSHOT: ${dest} (${Math.round(fs.statSync(dest).size / 1024)}KB) [${targetIdx + 1}/${dalleImgs.length}]`);
+      return dest;
     }
   } catch (e) {
-    console.log('Screenshot method failed:', e.message);
+    console.log('Screenshot failed:', e.message);
   }
 
-  console.error('ERROR: No downloadable DALL-E image found');
+  console.error('ERROR: Download failed for image', targetIdx);
   return null;
+}
+
+async function downloadAll(page, prefix) {
+  const dalleImgs = await listImages(page);
+  if (!dalleImgs.length) { console.error('No images found'); return; }
+  console.log(`Downloading ${dalleImgs.length} images...`);
+  for (let i = 0; i < dalleImgs.length; i++) {
+    await downloadImage(page, prefix, i);
+  }
+  console.log(`\nDone: ${dalleImgs.length} images saved to ${OUTPUT_DIR}`);
 }
 
 async function generate(page, type, brief) {
@@ -228,8 +267,9 @@ Commands:
   generate <type> <brief>  Generate poster (type: atw/mb/fund/raw)
   prompt <text>       Send raw prompt to ChatGPT
   wait                Wait for current DALL-E generation to finish
-  download [prefix]   Download latest generated image
-  images              List all DALL-E images in current conversation
+  download [prefix] [index]  Download image by index (default: latest)
+  download-all [prefix]      Download ALL images in conversation
+  images              List all DALL-E images with index numbers
 
 Types: atw (Around The World), mb (Market Brief), fund (Fund Holdings), raw (custom prompt)
 
@@ -258,14 +298,15 @@ Examples:
         await waitForImage(page);
         break;
       case 'download': case 'dl':
-        await downloadImage(page, args[0]);
+        await downloadImage(page, args[0], args[1]);
+        break;
+      case 'download-all': case 'dl-all':
+        await downloadAll(page, args[0]);
         break;
       case 'images': case 'imgs':
-        const count = await page.evaluate(() => {
-          const imgs = document.querySelectorAll('img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"]');
-          return imgs.length;
-        });
-        console.log(`${count} DALL-E images in current conversation`);
+        const dalleImgs = await listImages(page);
+        console.log(`${dalleImgs.length} DALL-E images:`);
+        dalleImgs.forEach((img, i) => console.log(`  [${i}] ${img.w}x${img.h} ${img.alt || img.src}`));
         break;
       default:
         console.error(`Unknown command: ${cmd}. Run with 'help'.`);
