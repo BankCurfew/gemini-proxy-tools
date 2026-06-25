@@ -165,22 +165,55 @@ async function downloadImage(page, prefix, indexArg) {
 
   const globalIdx = target.globalIdx;
 
-  // Method 1: Scroll to image + screenshot element (most reliable for cross-origin)
+  // Method 1: Fetch image src URL directly (works for ChatGPT backend API URLs)
+  try {
+    const imgData = await page.evaluate(async (gIdx) => {
+      const imgs = document.querySelectorAll('img');
+      const img = imgs[gIdx];
+      if (!img || !img.src) return null;
+      try {
+        const resp = await fetch(img.src, { credentials: 'include' });
+        if (!resp.ok) return null;
+        const blob = await resp.blob();
+        return new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result.split(',')[1]);
+          reader.readAsDataURL(blob);
+        });
+      } catch { return null; }
+    }, globalIdx);
+
+    if (imgData) {
+      fs.writeFileSync(dest, Buffer.from(imgData, 'base64'));
+      const size = Math.round(fs.statSync(dest).size / 1024);
+      if (size > 10) {
+        console.log(`SAVED: ${dest} (${size}KB) [${targetIdx + 1}/${dalleImgs.length}]`);
+        return dest;
+      }
+      console.log('Fetch returned small file, trying fallback...');
+    }
+  } catch (e) {
+    console.log('Fetch failed:', e.message);
+  }
+
+  // Method 2: Scroll to image + screenshot element
   try {
     const allImgs = await page.$$('img');
     if (allImgs[globalIdx]) {
       await allImgs[globalIdx].scrollIntoView();
-      await sleep(500);
+      await sleep(1000);
       await allImgs[globalIdx].screenshot({ path: dest });
       const size = Math.round(fs.statSync(dest).size / 1024);
-      console.log(`SAVED: ${dest} (${size}KB) [${targetIdx + 1}/${dalleImgs.length}]`);
-      return dest;
+      if (size > 10) {
+        console.log(`SAVED: ${dest} (${size}KB) [${targetIdx + 1}/${dalleImgs.length}]`);
+        return dest;
+      }
     }
   } catch (e) {
     console.log('Screenshot failed:', e.message);
   }
 
-  // Method 2: Canvas fallback (may fail on cross-origin)
+  // Method 3: Canvas fallback
   try {
     const imgData = await page.evaluate((gIdx) => {
       const img = document.querySelectorAll('img')[gIdx];
@@ -195,8 +228,11 @@ async function downloadImage(page, prefix, indexArg) {
 
     if (imgData) {
       fs.writeFileSync(dest, Buffer.from(imgData, 'base64'));
-      console.log(`SAVED: ${dest} (${Math.round(fs.statSync(dest).size / 1024)}KB) [${targetIdx + 1}/${dalleImgs.length}]`);
-      return dest;
+      const size = Math.round(fs.statSync(dest).size / 1024);
+      if (size > 10) {
+        console.log(`SAVED: ${dest} (${size}KB) [${targetIdx + 1}/${dalleImgs.length}]`);
+        return dest;
+      }
     }
   } catch (e) {
     console.log('Canvas failed:', e.message);
