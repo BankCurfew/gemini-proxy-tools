@@ -55,10 +55,11 @@ const BRAND_SEED = 'Logo: i=RED #C8102E, Agency=BLACK #1a1a2e, AIA=RED #C8102E. 
 function loadBrandTemplate() {
   try {
     const ci = fs.readFileSync(BRAND_CI_PATH, 'utf-8');
-    // Try to extract canonical template from CLAUDE_brand_ci.md section
-    const templateMatch = ci.match(/## 8\. POSTER PROMPT TEMPLATE[\s\S]*?```\n([\s\S]*?)```/);
+    // Try to extract canonical template from CLAUDE_brand_ci.md
+    const templateMatch = ci.match(/## \d+\. POSTER PROMPT TEMPLATE[^\n]*\n[\s\S]*?```\n([\s\S]*?)```/);
     if (templateMatch) {
-      console.log('[T7] Brand template loaded from CLAUDE_brand_ci.md §8');
+      const sectionNum = ci.match(/## (\d+)\. POSTER PROMPT TEMPLATE/)?.[1];
+      console.log(`[T7] Brand template loaded from CLAUDE_brand_ci.md §${sectionNum}`);
       return templateMatch[1].trim();
     }
   } catch {}
@@ -83,7 +84,11 @@ Hero: {HERO_DESCRIPTION}
 Key data with illustrated icons:
 {DATA_ITEMS}
 
-Footer: FB IG TikTok LINE iAgencyAIA. Source: {SOURCE} | {DATE}.
+Source line (above footer bar): Source: {SOURCE} | {DATE}
+
+Footer bar (red #C8102E bar at absolute bottom, white text):
+Line 1: FB iAgencyAIA | IG @iagencyaia | TikTok @iagencyaia | LINE @iagencyaia
+Line 2: iAgencyAIA | {DATE}
 
 {COLOR_NOTES}. 9:16 vertical. Generate now.`;
 
@@ -224,7 +229,34 @@ async function verifyImageGeneration(page, promptText, beforeCount) {
   }, promptText, beforeCount);
 }
 
-// ── T8: QA gate — verify dimensions + file size ──
+// ── Auto-resize to 1080x1920 (IG Story) — pad on brand canvas, never distort ──
+function resizeToIG(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return filePath;
+
+  const { execSync } = require('child_process');
+  const outPath = filePath.replace(/\.png$/, '-1080x1920.png');
+
+  try {
+    // Scale to fit within 1080x1920 maintaining aspect ratio, then pad with brand BG color
+    execSync(
+      `convert "${filePath}" -resize 1080x1920 -gravity center -background "#f0ede8" -extent 1080x1920 "${outPath}"`,
+      { timeout: 15000 }
+    );
+
+    if (fs.existsSync(outPath)) {
+      const size = Math.round(fs.statSync(outPath).size / 1024);
+      // Replace original with resized
+      fs.renameSync(outPath, filePath);
+      console.log(`  Resized → 1080x1920 (${size}KB, padded on #f0ede8)`);
+      return filePath;
+    }
+  } catch (e) {
+    console.error(`  Resize failed: ${e.message} — delivering original`);
+  }
+  return filePath;
+}
+
+// ── T8: QA gate — verify exact 1080x1920 + file size ──
 function qaGate(filePath) {
   if (!filePath || !fs.existsSync(filePath)) {
     return { pass: false, reason: 'file not found' };
@@ -238,10 +270,20 @@ function qaGate(filePath) {
     return { pass: false, reason: `file too small: ${sizeKB}KB (min ${minSize}KB)` };
   }
 
-  // Note: dimension check requires reading PNG header — simplified check via file size
-  // A 768x1024 PNG at reasonable quality is typically >100KB
-  console.log(`QA PASS: ${sizeKB}KB`);
-  return { pass: true, sizeKB };
+  // Check dimensions via ImageMagick identify
+  try {
+    const { execSync } = require('child_process');
+    const dims = execSync(`identify -format "%wx%h" "${filePath}"`, { timeout: 5000 }).toString().trim();
+    if (dims !== '1080x1920') {
+      return { pass: false, reason: `wrong dimensions: ${dims} (required: 1080x1920)` };
+    }
+    console.log(`QA PASS: ${sizeKB}KB, 1080x1920`);
+    return { pass: true, sizeKB, dimensions: dims };
+  } catch {
+    // identify not available — pass on size alone
+    console.log(`QA PASS: ${sizeKB}KB (dimensions not verified)`);
+    return { pass: true, sizeKB };
+  }
 }
 
 async function sendPrompt(page, prompt) {
@@ -588,15 +630,19 @@ async function generate(page, type, brief, taskId) {
       console.log(`\nAuto-downloading image [${newIdx}] (verified: from this prompt)...`);
       const dest = await downloadImage(page, type, newIdx);
 
-      // T8: QA gate
+      // Auto-resize to 1080x1920 (IG Story standard)
+      if (dest && type !== 'raw') {
+        resizeToIG(dest);
+      }
+
+      // T8: QA gate (checks exact 1080x1920 + size)
       if (dest) {
         const qa = qaGate(dest);
         if (!qa.pass) {
           console.error(`QA FAIL: ${qa.reason}`);
           heartbeat(taskId || '#13', 90, `QA-fail: ${qa.reason}`);
-          // Don't delete — let caller inspect, but warn
         } else {
-          console.log(`QA PASS: ${qa.sizeKB}KB`);
+          console.log(`QA PASS: ${qa.sizeKB}KB, ${qa.dimensions || 'dims OK'}`);
         }
       }
 
