@@ -138,7 +138,14 @@ async function getImageCount(page) {
 }
 
 async function rollBrandChat(page) {
-  const count = await getImageCount(page);
+  // Wait for DOM to settle — images load lazily after navigation
+  await sleep(2000);
+  let count = await getImageCount(page);
+  // Verify count is stable (not still loading)
+  await sleep(1000);
+  const count2 = await getImageCount(page);
+  if (count2 > count) count = count2;
+
   const max = cfg.max_chat_images || 40;
 
   if (count < max) {
@@ -607,6 +614,7 @@ async function generate(page, type, brief, taskId) {
   }
 
   console.error('FAILED after all retries');
+  process.exitCode = 1;
   return null;
 }
 
@@ -694,4 +702,6 @@ Examples:
   }
 }
 
-main().catch(e => { console.error('ERROR:', e.message); process.exit(1); });
+main()
+  .then(() => process.exit(process.exitCode || 0))
+  .catch(e => { console.error('ERROR:', e.message); process.exit(1); });
