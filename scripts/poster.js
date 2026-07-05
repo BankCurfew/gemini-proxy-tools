@@ -33,11 +33,39 @@ try {
 
 let BRAND_CHAT_URL = `${cfg.chatgpt_url}/c/${cfg.brand_chat_id}`;
 
-const BRAND_TEMPLATE = `Generate an image: {TYPE} poster, 9:16 vertical.
-Textured BG, generous spacing, correct logo (i=red Agency=black AIA=red),
-header padding, Asian people.
+// ── T7: Build BRAND_TEMPLATE at runtime from DocCon CLAUDE_brand_ci.md ──
+const BRAND_CI_PATH = path.join(
+  process.env.HOME || '/home/curfew',
+  'repos/github.com/BankCurfew/DocCon-Oracle/CLAUDE_brand_ci.md'
+);
 
-Badge: {BADGE} top-left. Logo: iAgencyAIA top-right.
+function loadBrandRules() {
+  try {
+    const ci = fs.readFileSync(BRAND_CI_PATH, 'utf-8');
+    // Extract key rules from brand CI
+    const logoMatch = ci.match(/\| \*\*i\*\* \| .* \| `(#[A-F0-9]+)`/);
+    const logoRed = logoMatch ? logoMatch[1] : '#C8102E';
+    const placementMatch = ci.match(/Default \| ([^|]+) \|/);
+    const placement = placementMatch ? placementMatch[1].trim() : 'Top-right, 80px from top';
+    const fontMatch = ci.match(/\*\*Thai\*\* \| \*\*([^*]+)\*\*/);
+    const thaiFont = fontMatch ? fontMatch[1] : 'LINESeedSansTH';
+    return { logoRed, placement, thaiFont, loaded: true };
+  } catch {
+    return { logoRed: '#C8102E', placement: 'top-right', thaiFont: 'LINESeedSansTH', loaded: false };
+  }
+}
+
+const BRAND = loadBrandRules();
+if (BRAND.loaded) {
+  console.log(`[T7] Brand CI loaded: logo ${BRAND.logoRed}, font ${BRAND.thaiFont}`);
+}
+
+const BRAND_TEMPLATE = `Generate an image: {TYPE} poster, 9:16 vertical.
+Textured BG, generous spacing, correct logo (i=${BRAND.logoRed} red, Agency=black, AIA=${BRAND.logoRed} red).
+Logo placement: ${BRAND.placement}. Thai font style: ${BRAND.thaiFont} (clean, modern).
+Header padding, Asian people.
+
+Badge: {BADGE} top-left. Logo: iAgencyAIA ${BRAND.placement}.
 
 Headline (bold, {MOOD}):
 {HEADLINE}
