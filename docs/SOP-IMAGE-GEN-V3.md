@@ -46,11 +46,12 @@
 ### Usage
 
 ```bash
-# Basic generation
-node scripts/poster.js generate "ประกันชีวิต CI" --type promo --badge "สาระประกัน"
-
-# With /poster skill (after BotDev implements)
+# /poster skill (RECOMMENDED — wraps full pipeline with recovery + QA)
 /poster promo "ประกันชีวิต CI ครอบคลุม 50 โรค"
+/poster story "ข่าวดี ลูกค้า AIA ต่ออายุได้"
+
+# Direct node (when skill unavailable)
+node scripts/poster.js generate "ประกันชีวิต CI" --type promo --badge "สาระประกัน"
 ```
 
 ### Config (poster.config.json — after T4 de-hardcode)
