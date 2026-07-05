@@ -507,6 +507,13 @@ async function generate(page, type, brief, taskId) {
   // T6: Pre-flight rotation check
   await rollBrandChat(page);
 
+  // T10: raw type = TESTING ONLY warning
+  if (type === 'raw') {
+    console.log('\n⚠️  WARNING: "raw" type is TESTING ONLY — not for deliverables.');
+    console.log('   Deliverables must use atw/mb/fund (composed through BRAND_TEMPLATE).');
+    console.log('   This image will NOT pass brand-consistency gate.\n');
+  }
+
   let prompt;
   if (type === 'raw') {
     prompt = brief;
