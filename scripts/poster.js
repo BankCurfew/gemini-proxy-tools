@@ -39,45 +39,53 @@ const BRAND_CI_PATH = path.join(
   'repos/github.com/BankCurfew/DocCon-Oracle/CLAUDE_brand_ci.md'
 );
 
-function loadBrandRules() {
+// ── T7: Load brand template from DocCon CLAUDE_brand_ci.md (Designer's proven template) ──
+
+const TYPE_MAP = {
+  atw:      { badge: 'ATW', name: 'Around The World', icon: 'globe',  color: 'blue' },
+  mb:       { badge: 'MB',  name: 'Market Brief',    icon: 'chart',  color: 'green' },
+  fund:     { badge: 'FND', name: 'Fund Holdings',   icon: 'coins',  color: 'gold' },
+  breaking: { badge: 'BRK', name: 'Breaking',        icon: 'alert',  color: 'red' },
+  viral:    { badge: 'VRL', name: 'Viral',            icon: 'fire',   color: 'purple' },
+  promo:    { badge: 'PRM', name: 'Promo',            icon: 'gift',   color: 'red+gold' },
+};
+
+const BRAND_SEED = 'Logo: i=RED #C8102E, Agency=BLACK #1a1a2e, AIA=RED #C8102E. BG: textured off-white #f0ede8 with gray curved lines #c5c0b8 (2-3px). Three-layer: flat 2D cards + realistic heroes + illustrated icons. NO text unless exact Thai text given.';
+
+function loadBrandTemplate() {
   try {
     const ci = fs.readFileSync(BRAND_CI_PATH, 'utf-8');
-    // Extract key rules from brand CI
-    const logoMatch = ci.match(/\| \*\*i\*\* \| .* \| `(#[A-F0-9]+)`/);
-    const logoRed = logoMatch ? logoMatch[1] : '#C8102E';
-    const placementMatch = ci.match(/Default \| ([^|]+) \|/);
-    const placement = placementMatch ? placementMatch[1].trim() : 'Top-right, 80px from top';
-    const fontMatch = ci.match(/\*\*Thai\*\* \| \*\*([^*]+)\*\*/);
-    const thaiFont = fontMatch ? fontMatch[1] : 'LINESeedSansTH';
-    return { logoRed, placement, thaiFont, loaded: true };
-  } catch {
-    return { logoRed: '#C8102E', placement: 'top-right', thaiFont: 'LINESeedSansTH', loaded: false };
-  }
+    // Try to extract canonical template from CLAUDE_brand_ci.md section
+    const templateMatch = ci.match(/## 8\. POSTER PROMPT TEMPLATE[\s\S]*?```\n([\s\S]*?)```/);
+    if (templateMatch) {
+      console.log('[T7] Brand template loaded from CLAUDE_brand_ci.md §8');
+      return templateMatch[1].trim();
+    }
+  } catch {}
+  // Fallback: Designer's proven template (from thread #17, msg 638)
+  console.log('[T7] Using Designer proven template (DocCon section not found yet)');
+  return null;
 }
 
-const BRAND = loadBrandRules();
-if (BRAND.loaded) {
-  console.log(`[T7] Brand CI loaded: logo ${BRAND.logoRed}, font ${BRAND.thaiFont}`);
-}
+const LOADED_TEMPLATE = loadBrandTemplate();
 
-const BRAND_TEMPLATE = `Generate an image: {TYPE} poster, 9:16 vertical.
-Textured BG, generous spacing, correct logo (i=${BRAND.logoRed} red, Agency=black, AIA=${BRAND.logoRed} red).
-Logo placement: ${BRAND.placement}. Thai font style: ${BRAND.thaiFont} (clean, modern).
-Header padding, Asian people.
+const BRAND_TEMPLATE = LOADED_TEMPLATE || `Generate an image: {TYPE} poster, 9:16 vertical.
+Textured BG, generous spacing, correct logo (i=red Agency=black AIA=red),
+header padding, Asian people.
 
-Badge: {BADGE} top-left. Logo: iAgencyAIA ${BRAND.placement}.
+Badge: {BADGE_CODE} ({BADGE_NAME}) top-left with {BADGE_ICON} icon, {BADGE_COLOR}. Logo: iAgencyAIA top-right.
 
-Headline (bold, {MOOD}):
-{HEADLINE}
+Headline ({MOOD}, {ACCENT_COLOR}):
+{HEADLINE_TEXT}
 
-Hero: {HERO}
+Hero: {HERO_DESCRIPTION}
 
-Data cards (flat 2D, illustrated colorful icons):
-{CARDS}
+Key data with illustrated icons:
+{DATA_ITEMS}
 
-Footer: FB IG TikTok LINE iAgencyAIA. {SOURCE} | {DATE}.
+Footer: FB IG TikTok LINE iAgencyAIA. Source: {SOURCE} | {DATE}.
 
-Light theme. 9:16 vertical. Generate now.`;
+{COLOR_NOTES}. 9:16 vertical. Generate now.`;
 
 // ── T2: Refusal patterns (EN + THAI) ──
 const REFUSAL_PATTERNS = [
@@ -163,8 +171,8 @@ async function rollBrandChat(page) {
   const newChatUrl = await page.evaluate(() => window.location.href);
   console.log(`New chat opened: ${newChatUrl}`);
 
-  // Re-seed brand kit with a short primer
-  const primer = `You are creating posters for iAgencyAIA brand. Logo: "i" (red) "Agency" (black) "AIA" (red). Always 9:16 vertical. Textured backgrounds, generous spacing, Asian people. Acknowledge with "Ready for poster requests."`;
+  // Re-seed brand kit with Designer's proven BRAND_SEED
+  const primer = `${BRAND_SEED}\n\nYou are creating posters for iAgencyAIA brand. Always 9:16 vertical. Textured backgrounds, generous spacing, Asian people. Acknowledge with "Ready for poster requests."`;
   await sleep(1000);
 
   const typed = await page.evaluate((text) => {
@@ -525,14 +533,24 @@ async function generate(page, type, brief, taskId) {
   if (type === 'raw') {
     prompt = brief;
   } else {
+    const tm = TYPE_MAP[type] || { badge: type.toUpperCase(), name: type, icon: 'star', color: 'blue' };
     prompt = BRAND_TEMPLATE
       .replace('{TYPE}', type)
-      .replace('{BADGE}', type.toUpperCase())
+      .replace('{BADGE_CODE}', tm.badge)
+      .replace('{BADGE_NAME}', tm.name)
+      .replace('{BADGE_ICON}', tm.icon)
+      .replace('{BADGE_COLOR}', tm.color)
+      .replace('{BADGE}', `${tm.badge} (${tm.name})`)
       .replace('{DATE}', dateStr)
       .replace('{MOOD}', 'professional')
+      .replace('{ACCENT_COLOR}', tm.color)
+      .replace('{HEADLINE_TEXT}', brief)
       .replace('{HEADLINE}', brief)
+      .replace('{HERO_DESCRIPTION}', brief)
       .replace('{HERO}', brief)
+      .replace('{DATA_ITEMS}', '')
       .replace('{CARDS}', '')
+      .replace('{COLOR_NOTES}', tm.color === 'red' ? 'Dark background #0a0a12' : 'Light theme')
       .replace('{SOURCE}', 'iAgencyAIA');
   }
 
