@@ -1,1 +1,7 @@
 node_modules/
+*.key.json
+*token*.json
+*.pem
+*.p12
+*.pfx
+*.jks

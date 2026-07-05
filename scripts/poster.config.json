@@ -1,0 +1,13 @@
+{
+  "chatgpt_url": "https://chatgpt.com",
+  "brand_chat_id": "6a2e2fee-f228-83ec-a55a-e85f221d620f",
+  "output_dir": "/mnt/c/Users/mbank/OneDrive/AIA/Posters",
+  "downloads_dir": "/mnt/c/Users/mbank/Downloads",
+  "cdp_url": "http://localhost:9222",
+  "cdp_protocol_timeout": 120000,
+  "generation_timeout_ms": 180000,
+  "poll_interval_ms": 5000,
+  "stall_threshold_polls": 6,
+  "max_retries": 1,
+  "heartbeat_oracle": "Designer-Oracle"
+}

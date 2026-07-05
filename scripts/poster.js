@@ -1,17 +1,37 @@
 #!/usr/bin/env node
-// Poster CLI — CDP-based ChatGPT DALL-E poster generation
-// No browser extension needed — direct Chrome automation
-// Usage: node poster.js <command> [args...]
+// Poster CLI v3 — CDP-based ChatGPT DALL-E poster generation
+// T1: auto-refresh recovery (page.reload on stall)
+// T2: refusal detection (EN+THAI regex, distinct exit code 2)
+// T4: config from poster.config.json
+// T5: heartbeat during generation (Rule #9)
+// Task: gemini-proxy-tools#13
 
 const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const path = require('path');
 
-const CHATGPT_URL = 'https://chatgpt.com';
-const BRAND_CHAT_ID = '6a2e2fee-f228-83ec-a55a-e85f221d620f';
-const BRAND_CHAT_URL = `https://chatgpt.com/c/${BRAND_CHAT_ID}`;
-const OUTPUT_DIR = '/mnt/c/Users/mbank/OneDrive/AIA/Posters';
-const DOWNLOADS_DIR = '/mnt/c/Users/mbank/Downloads';
+// ── T4: Config from file ──
+const CONFIG_PATH = path.join(__dirname, 'poster.config.json');
+const defaults = {
+  chatgpt_url: 'https://chatgpt.com',
+  brand_chat_id: '6a2e2fee-f228-83ec-a55a-e85f221d620f',
+  output_dir: '/mnt/c/Users/mbank/OneDrive/AIA/Posters',
+  downloads_dir: '/mnt/c/Users/mbank/Downloads',
+  cdp_url: 'http://localhost:9222',
+  cdp_protocol_timeout: 120000,
+  generation_timeout_ms: 180000,
+  poll_interval_ms: 5000,
+  stall_threshold_polls: 6,
+  max_retries: 1,
+  heartbeat_oracle: 'Designer-Oracle',
+};
+let cfg = { ...defaults };
+try {
+  const file = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+  cfg = { ...defaults, ...file };
+} catch {}
+
+const BRAND_CHAT_URL = `${cfg.chatgpt_url}/c/${cfg.brand_chat_id}`;
 
 const BRAND_TEMPLATE = `Generate an image: {TYPE} poster, 9:16 vertical.
 Textured BG, generous spacing, correct logo (i=red Agency=black AIA=red),
@@ -31,13 +51,40 @@ Footer: FB IG TikTok LINE iAgencyAIA. {SOURCE} | {DATE}.
 
 Light theme. 9:16 vertical. Generate now.`;
 
+// ── T2: Refusal patterns (EN + THAI) ──
+const REFUSAL_PATTERNS = [
+  /i (?:can't|cannot|am unable to|won't) (?:create|generate|produce|make)/i,
+  /(?:violates?|against|contrary to) (?:my |our )?(?:policies?|guidelines?|content policy|terms)/i,
+  /(?:not able to|unable to) (?:generate|create|produce|fulfill)/i,
+  /this (?:request|prompt) (?:isn't|is not) something I can/i,
+  /ไม่สามารถสร้าง/,
+  /ขัดต่อนโยบาย/,
+  /ไม่สามารถทำตาม/,
+  /ไม่เหมาะสม/,
+  /ละเมิดนโยบาย/,
+  /ฝ่าฝืนข้อกำหนด/,
+];
+
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// ── T5: Heartbeat ──
+function heartbeat(taskId, pct, status) {
+  const ts = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok', hour12: false }).replace(',', '');
+  const oracle = cfg.heartbeat_oracle;
+  const hostname = require('os').hostname();
+  const line = `${ts} | ${oracle} | ${hostname} | Notification | ${oracle} | heartbeat » HB: ${taskId} ${pct}% ${status}\n`;
+  const feedPath = path.join(process.env.HOME || '/home/curfew', '.oracle/feed.log');
+  try { fs.appendFileSync(feedPath, line); } catch {}
+}
+
 async function connect() {
-  const browser = await puppeteer.connect({ browserURL: 'http://localhost:9222', defaultViewport: null, protocolTimeout: 120000 });
+  const browser = await puppeteer.connect({
+    browserURL: cfg.cdp_url,
+    defaultViewport: null,
+    protocolTimeout: cfg.cdp_protocol_timeout,
+  });
   const pages = await browser.pages();
-  // Find brand chat tab, or any ChatGPT tab, or open brand chat
-  let page = pages.find(p => p.url().includes(BRAND_CHAT_ID));
+  let page = pages.find(p => p.url().includes(cfg.brand_chat_id));
   if (!page) page = pages.find(p => p.url().includes('chatgpt.com/c/'));
   if (!page) page = pages.find(p => p.url().includes('chatgpt.com'));
 
@@ -46,7 +93,7 @@ async function connect() {
     page = await browser.newPage();
     await page.goto(BRAND_CHAT_URL, { waitUntil: 'networkidle2' });
     await sleep(3000);
-  } else if (!page.url().includes(BRAND_CHAT_ID)) {
+  } else if (!page.url().includes(cfg.brand_chat_id)) {
     console.log('ChatGPT tab found but not brand chat. Navigating...');
     await page.goto(BRAND_CHAT_URL, { waitUntil: 'networkidle2' });
     await sleep(3000);
@@ -56,7 +103,6 @@ async function connect() {
 }
 
 async function sendPrompt(page, prompt) {
-  // Find ChatGPT input box and type
   const typed = await page.evaluate((text) => {
     const textarea = document.querySelector('#prompt-textarea, textarea[data-id], div[contenteditable="true"]');
     if (!textarea) return false;
@@ -77,7 +123,6 @@ async function sendPrompt(page, prompt) {
 
   await sleep(500);
 
-  // Click send button
   await page.evaluate(() => {
     const btn = document.querySelector('button[data-testid="send-button"], button[aria-label="Send prompt"]');
     if (btn) btn.click();
@@ -93,13 +138,48 @@ async function sendPrompt(page, prompt) {
   return true;
 }
 
-async function waitForImage(page, timeoutMs = 180000) {
+// ── T2: Read last assistant message ──
+async function getLastAssistantMsg(page) {
+  return page.evaluate(() => {
+    const msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
+    if (!msgs.length) return '';
+    const last = msgs[msgs.length - 1];
+    return (last.textContent || '').trim().slice(0, 500);
+  });
+}
+
+function checkRefusal(text) {
+  for (const pat of REFUSAL_PATTERNS) {
+    if (pat.test(text)) {
+      return { refused: true, reason: text.slice(0, 200) };
+    }
+  }
+  return { refused: false };
+}
+
+// ── T1+T2+T5: Wait with auto-refresh recovery + refusal detection + heartbeat ──
+async function waitForImage(page, taskId, timeoutMs) {
+  timeoutMs = timeoutMs || cfg.generation_timeout_ms;
   const startTime = Date.now();
-  let lastCount = await page.evaluate(() => document.querySelectorAll('img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"]').length);
+  let lastCount = await page.evaluate(() =>
+    document.querySelectorAll('img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"]').length
+  );
+  let stallPolls = 0;
+  let lastMsgText = '';
+  let pollNum = 0;
+
+  heartbeat(taskId || '#13', 5, 'generation-started');
 
   while (Date.now() - startTime < timeoutMs) {
-    await sleep(5000);
+    await sleep(cfg.poll_interval_ms);
+    pollNum++;
     const elapsed = Math.round((Date.now() - startTime) / 1000);
+    const pct = Math.min(90, Math.round((elapsed / (timeoutMs / 1000)) * 90));
+
+    // T5: heartbeat every 6 polls (~30s)
+    if (pollNum % 6 === 0) {
+      heartbeat(taskId || '#13', pct, `waiting ${elapsed}s`);
+    }
 
     const status = await page.evaluate(() => {
       const imgs = document.querySelectorAll('img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"]');
@@ -108,23 +188,50 @@ async function waitForImage(page, timeoutMs = 180000) {
     });
 
     if (status.imgCount > lastCount) {
-      console.log(`Image generated! (${elapsed}s)`);
-      return true;
+      console.log(`\nImage generated! (${elapsed}s)`);
+      heartbeat(taskId || '#13', 95, 'image-detected');
+      return { ok: true };
+    }
+
+    // T2: Check for refusal
+    const msgText = await getLastAssistantMsg(page);
+    if (msgText && msgText !== lastMsgText && !status.isThinking) {
+      lastMsgText = msgText;
+      const refusal = checkRefusal(msgText);
+      if (refusal.refused) {
+        console.log(`\nREFUSED: ${refusal.reason}`);
+        heartbeat(taskId || '#13', 0, 'refused');
+        return { ok: false, refused: true, reason: refusal.reason };
+      }
+    }
+
+    // T1: Stall detection — flat count for too long
+    if (status.imgCount === lastCount && !status.isThinking && elapsed > 30) {
+      stallPolls++;
+    } else {
+      stallPolls = 0;
+    }
+
+    if (stallPolls >= cfg.stall_threshold_polls) {
+      console.log(`\nSTALL detected (${stallPolls} flat polls, ${elapsed}s). Auto-refreshing...`);
+      heartbeat(taskId || '#13', pct, 'stall-refresh');
+      return { ok: false, stalled: true };
     }
 
     if (status.isThinking) {
       process.stdout.write(`\r  Generating... ${elapsed}s`);
     } else if (elapsed > 10) {
-      process.stdout.write(`\r  Waiting... ${elapsed}s (${status.imgCount} images)`);
+      process.stdout.write(`\r  Waiting... ${elapsed}s (${status.imgCount} images, stall:${stallPolls}/${cfg.stall_threshold_polls})`);
     }
   }
 
   console.log('\nTIMEOUT: No new image after', Math.round(timeoutMs / 1000), 's');
-  return false;
+  heartbeat(taskId || '#13', 0, 'timeout');
+  return { ok: false, timeout: true };
 }
 
 async function listImages(page) {
-  const imgs = await page.evaluate(() => {
+  return page.evaluate(() => {
     return Array.from(document.querySelectorAll('img')).map((img, i) => ({
       globalIdx: i,
       w: img.naturalWidth || img.width,
@@ -134,22 +241,17 @@ async function listImages(page) {
       hasAlt: !!(img.alt && img.alt.startsWith('Generated'))
     })).filter(img => img.w > 300 && img.h > 300 && img.hasAlt);
   });
-  return imgs;
 }
 
 async function downloadImage(page, prefix, indexArg) {
   const dateStr = new Date().toISOString().slice(0, 10);
-
-  // List all DALL-E images
   const dalleImgs = await listImages(page);
   if (!dalleImgs.length) {
     console.error('ERROR: No large images found');
     return null;
   }
 
-  // If no index specified, show list and download latest
   const targetIdx = indexArg !== undefined ? parseInt(indexArg) : dalleImgs.length - 1;
-
   if (targetIdx < 0 || targetIdx >= dalleImgs.length) {
     console.error(`ERROR: index ${targetIdx} out of range (0-${dalleImgs.length - 1})`);
     dalleImgs.forEach((img, i) => console.log(`  [${i}] ${img.w}x${img.h} ${img.alt || img.src}`));
@@ -158,14 +260,13 @@ async function downloadImage(page, prefix, indexArg) {
 
   const target = dalleImgs[targetIdx];
   const suffix = dalleImgs.length > 1 ? `-${targetIdx + 1}of${dalleImgs.length}` : '';
-  const dest = path.join(OUTPUT_DIR, `${prefix || 'poster'}-${dateStr}${suffix}.png`);
+  const dest = path.join(cfg.output_dir, `${prefix || 'poster'}-${dateStr}${suffix}.png`);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
 
   console.log(`Downloading image [${targetIdx}] ${target.w}x${target.h}...`);
-
   const globalIdx = target.globalIdx;
 
-  // Method 1: Fetch image src URL directly (works for ChatGPT backend API URLs)
+  // Method 1: Fetch image src
   try {
     const imgData = await page.evaluate(async (gIdx) => {
       const imgs = document.querySelectorAll('img');
@@ -196,7 +297,7 @@ async function downloadImage(page, prefix, indexArg) {
     console.log('Fetch failed:', e.message);
   }
 
-  // Method 2: Scroll to image + screenshot element
+  // Method 2: Screenshot element
   try {
     const allImgs = await page.$$('img');
     if (allImgs[globalIdx]) {
@@ -249,10 +350,11 @@ async function downloadAll(page, prefix) {
   for (let i = 0; i < dalleImgs.length; i++) {
     await downloadImage(page, prefix, i);
   }
-  console.log(`\nDone: ${dalleImgs.length} images saved to ${OUTPUT_DIR}`);
+  console.log(`\nDone: ${dalleImgs.length} images saved to ${cfg.output_dir}`);
 }
 
-async function generate(page, type, brief) {
+// ── T1: Generate with auto-refresh + refusal reframe ──
+async function generate(page, type, brief, taskId) {
   const dateStr = new Date().toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' });
 
   let prompt;
@@ -270,22 +372,55 @@ async function generate(page, type, brief) {
       .replace('{SOURCE}', 'iAgencyAIA');
   }
 
-  // Count images before generation
-  const beforeCount = (await listImages(page)).length;
+  for (let attempt = 0; attempt <= cfg.max_retries; attempt++) {
+    if (attempt > 0) {
+      console.log(`\nRetry ${attempt}/${cfg.max_retries}...`);
+    }
 
-  console.log(`Generating ${type} poster...`);
-  const sent = await sendPrompt(page, prompt);
-  if (!sent) return null;
+    const beforeCount = (await listImages(page)).length;
+    console.log(`Generating ${type} poster (attempt ${attempt + 1})...`);
+    const sent = await sendPrompt(page, prompt);
+    if (!sent) return null;
 
-  const found = await waitForImage(page);
-  if (found) {
-    // Auto-download the new image
-    const afterImgs = await listImages(page);
-    const newIdx = afterImgs.length - 1;
-    console.log(`\nAuto-downloading image [${newIdx}]...`);
-    const dest = await downloadImage(page, type, newIdx);
-    return dest;
+    const result = await waitForImage(page, taskId);
+
+    if (result.ok) {
+      const afterImgs = await listImages(page);
+      const newIdx = afterImgs.length - 1;
+      console.log(`\nAuto-downloading image [${newIdx}]...`);
+      const dest = await downloadImage(page, type, newIdx);
+      heartbeat(taskId || '#13', 100, 'done');
+      return dest;
+    }
+
+    // T2: Refusal — reframe and retry once
+    if (result.refused && attempt < cfg.max_retries) {
+      console.log('Reframing prompt for retry...');
+      prompt = `Please create a professional visual: ${brief}. Style: clean, modern, vertical 9:16. Brand: iAgencyAIA. Generate now.`;
+      continue;
+    }
+
+    // T1: Stall — page.reload and retry
+    if (result.stalled && attempt < cfg.max_retries) {
+      console.log('Refreshing page for retry...');
+      try {
+        await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
+        await sleep(3000);
+      } catch (e) {
+        console.error('Reload failed:', e.message);
+      }
+      continue;
+    }
+
+    // Timeout or final failure
+    if (result.refused) {
+      console.error('REFUSED after retry:', result.reason);
+      process.exitCode = 2;
+      return null;
+    }
   }
+
+  console.error('FAILED after all retries');
   return null;
 }
 
@@ -305,23 +440,27 @@ async function main() {
   const [,, cmd, ...args] = process.argv;
 
   if (!cmd || cmd === 'help') {
-    console.log(`Poster CLI — ChatGPT DALL-E poster generation via CDP
+    console.log(`Poster CLI v3 — ChatGPT DALL-E poster generation via CDP
 
 Commands:
   status              Check ChatGPT tab status
-  generate <type> <brief>  Generate poster (type: atw/mb/fund/raw)
+  generate <type> <brief>  Generate poster with auto-recovery
   prompt <text>       Send raw prompt to ChatGPT
-  wait                Wait for current DALL-E generation to finish
+  wait [taskId]       Wait for current generation (with heartbeat)
   download [prefix] [index]  Download image by index (default: latest)
   download-all [prefix]      Download ALL images in conversation
   images              List all DALL-E images with index numbers
 
 Types: atw (Around The World), mb (Market Brief), fund (Fund Holdings), raw (custom prompt)
 
+Recovery: auto-refresh on stall (${cfg.stall_threshold_polls} flat polls → reload → retry)
+Refusal: EN+THAI detection → reframe → retry once (exit code 2 if final)
+Config: ${CONFIG_PATH}
+
 Examples:
-  node poster.js generate atw "China sanctions + Thai FDI +73% + Iran roadmap"
-  node poster.js prompt "Generate a poster about..."
-  node poster.js download atw-23jun
+  node poster.js generate atw "China sanctions + Thai FDI +73%"
+  node poster.js generate raw "A beautiful sunset poster"
+  node poster.js download atw-05jul
   node poster.js status`);
     return;
   }
@@ -334,13 +473,13 @@ Examples:
         await status(page);
         break;
       case 'generate': case 'gen':
-        await generate(page, args[0] || 'raw', args.slice(1).join(' '));
+        await generate(page, args[0] || 'raw', args.slice(1).join(' '), args[0]);
         break;
       case 'prompt': case 'send':
         await sendPrompt(page, args.join(' '));
         break;
       case 'wait':
-        await waitForImage(page);
+        await waitForImage(page, args[0] || '#13');
         break;
       case 'download': case 'dl':
         await downloadImage(page, args[0], args[1]);
@@ -348,11 +487,12 @@ Examples:
       case 'download-all': case 'dl-all':
         await downloadAll(page, args[0]);
         break;
-      case 'images': case 'imgs':
+      case 'images': case 'imgs': {
         const dalleImgs = await listImages(page);
         console.log(`${dalleImgs.length} DALL-E images:`);
         dalleImgs.forEach((img, i) => console.log(`  [${i}] ${img.w}x${img.h} ${img.alt || img.src}`));
         break;
+      }
       default:
         console.error(`Unknown command: ${cmd}. Run with 'help'.`);
     }
