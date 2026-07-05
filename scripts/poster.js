@@ -31,7 +31,7 @@ try {
   cfg = { ...defaults, ...file };
 } catch {}
 
-const BRAND_CHAT_URL = `${cfg.chatgpt_url}/c/${cfg.brand_chat_id}`;
+let BRAND_CHAT_URL = `${cfg.chatgpt_url}/c/${cfg.brand_chat_id}`;
 
 const BRAND_TEMPLATE = `Generate an image: {TYPE} poster, 9:16 vertical.
 Textured BG, generous spacing, correct logo (i=red Agency=black AIA=red),
@@ -102,6 +102,105 @@ async function connect() {
   return { browser, page };
 }
 
+// ── T6: Brand-chat rotation — open fresh chat when count >= max_chat_images ──
+async function getImageCount(page) {
+  return page.evaluate(() =>
+    document.querySelectorAll('img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"]').length
+  );
+}
+
+async function rollBrandChat(page) {
+  const count = await getImageCount(page);
+  const max = cfg.max_chat_images || 40;
+
+  if (count < max) {
+    console.log(`Brand chat: ${count}/${max} images — OK`);
+    return false;
+  }
+
+  console.log(`Brand chat: ${count}/${max} images — ROTATING to fresh chat...`);
+  heartbeat('#13', 2, `roll-brand (${count} images)`);
+
+  await page.goto(`${cfg.chatgpt_url}`, { waitUntil: 'networkidle2' });
+  await sleep(2000);
+
+  // Click "New chat" or navigate to base URL (which opens new chat)
+  const newChatUrl = await page.evaluate(() => window.location.href);
+  console.log(`New chat opened: ${newChatUrl}`);
+
+  // Re-seed brand kit with a short primer
+  const primer = `You are creating posters for iAgencyAIA brand. Logo: "i" (red) "Agency" (black) "AIA" (red). Always 9:16 vertical. Textured backgrounds, generous spacing, Asian people. Acknowledge with "Ready for poster requests."`;
+  await sleep(1000);
+
+  const typed = await page.evaluate((text) => {
+    const textarea = document.querySelector('#prompt-textarea, textarea[data-id], div[contenteditable="true"]');
+    if (!textarea) return false;
+    if (textarea.tagName === 'TEXTAREA') {
+      textarea.value = text;
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    } else {
+      textarea.innerText = text;
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    return true;
+  }, primer);
+
+  if (typed) {
+    await sleep(300);
+    await page.evaluate(() => {
+      const btn = document.querySelector('button[data-testid="send-button"], button[aria-label="Send prompt"]');
+      if (btn) btn.click();
+    });
+    await sleep(5000); // Wait for ack
+  }
+
+  console.log('Brand chat rotated + re-seeded.');
+  return true;
+}
+
+// ── T9: Verify image belongs to THIS prompt's assistant message ──
+async function verifyImageGeneration(page, promptText, beforeCount) {
+  return page.evaluate((prompt, before) => {
+    const assistantMsgs = document.querySelectorAll('[data-message-author-role="assistant"]');
+    if (!assistantMsgs.length) return { valid: false, reason: 'no assistant messages' };
+
+    const lastMsg = assistantMsgs[assistantMsgs.length - 1];
+    const msgImages = lastMsg.querySelectorAll('img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"]');
+
+    if (msgImages.length === 0) {
+      return { valid: false, reason: 'no images in last assistant message' };
+    }
+
+    // Check that the image is a new one (not pre-existing)
+    const allImgs = document.querySelectorAll('img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"]');
+    if (allImgs.length <= before) {
+      return { valid: false, reason: `total count ${allImgs.length} not greater than baseline ${before}` };
+    }
+
+    return { valid: true, imgCount: msgImages.length, totalCount: allImgs.length };
+  }, promptText, beforeCount);
+}
+
+// ── T8: QA gate — verify dimensions + file size ──
+function qaGate(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return { pass: false, reason: 'file not found' };
+  }
+
+  const stats = fs.statSync(filePath);
+  const sizeKB = Math.round(stats.size / 1024);
+  const minSize = cfg.qa_min_size_kb || 50;
+
+  if (sizeKB < minSize) {
+    return { pass: false, reason: `file too small: ${sizeKB}KB (min ${minSize}KB)` };
+  }
+
+  // Note: dimension check requires reading PNG header — simplified check via file size
+  // A 768x1024 PNG at reasonable quality is typically >100KB
+  console.log(`QA PASS: ${sizeKB}KB`);
+  return { pass: true, sizeKB };
+}
+
 async function sendPrompt(page, prompt) {
   const typed = await page.evaluate((text) => {
     const textarea = document.querySelector('#prompt-textarea, textarea[data-id], div[contenteditable="true"]');
@@ -157,13 +256,33 @@ function checkRefusal(text) {
   return { refused: false };
 }
 
-// ── T1+T2+T5: Wait with auto-refresh recovery + refusal detection + heartbeat ──
-async function waitForImage(page, taskId, timeoutMs) {
+// ── T1+T2+T5+T9: Wait with stable baseline, recovery, refusal detection, heartbeat ──
+async function waitForImage(page, taskId, timeoutMs, opts) {
+  opts = opts || {};
   timeoutMs = timeoutMs || cfg.generation_timeout_ms;
   const startTime = Date.now();
-  let lastCount = await page.evaluate(() =>
-    document.querySelectorAll('img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"]').length
-  );
+  const stablePolls = cfg.stall_stable_polls || 3;
+
+  // T9: After refresh, wait for stable baseline before counting
+  let lastCount;
+  if (opts.stabilize) {
+    console.log('  Stabilizing baseline...');
+    let stableCount = 0;
+    let prevCount = -1;
+    for (let i = 0; i < stablePolls + 2; i++) {
+      await sleep(cfg.poll_interval_ms);
+      const c = await getImageCount(page);
+      if (c === prevCount) stableCount++;
+      else stableCount = 0;
+      prevCount = c;
+      if (stableCount >= stablePolls) break;
+    }
+    lastCount = prevCount;
+    console.log(`  Baseline stabilized at ${lastCount} images`);
+  } else {
+    lastCount = await getImageCount(page);
+  }
+
   let stallPolls = 0;
   let lastMsgText = '';
   let pollNum = 0;
@@ -353,9 +472,12 @@ async function downloadAll(page, prefix) {
   console.log(`\nDone: ${dalleImgs.length} images saved to ${cfg.output_dir}`);
 }
 
-// ── T1: Generate with auto-refresh + refusal reframe ──
+// ── T1+T6+T8+T9: Generate with rotation, recovery, verification, QA gate ──
 async function generate(page, type, brief, taskId) {
   const dateStr = new Date().toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' });
+
+  // T6: Pre-flight rotation check
+  await rollBrandChat(page);
 
   let prompt;
   if (type === 'raw') {
@@ -378,17 +500,46 @@ async function generate(page, type, brief, taskId) {
     }
 
     const beforeCount = (await listImages(page)).length;
-    console.log(`Generating ${type} poster (attempt ${attempt + 1})...`);
+    console.log(`Generating ${type} poster (attempt ${attempt + 1}, baseline: ${beforeCount} images)...`);
     const sent = await sendPrompt(page, prompt);
     if (!sent) return null;
 
-    const result = await waitForImage(page, taskId);
+    // T9: after refresh/retry, stabilize baseline
+    const stabilize = attempt > 0;
+    const result = await waitForImage(page, taskId, null, { stabilize });
 
     if (result.ok) {
+      // T9: Verify image is from THIS prompt's response
+      const verification = await verifyImageGeneration(page, prompt, beforeCount);
+      if (!verification.valid) {
+        console.log(`\nT9 MISMATCH: ${verification.reason}`);
+        if (attempt < cfg.max_retries) {
+          console.log('Image belongs to previous generation — retrying...');
+          heartbeat(taskId || '#13', 50, 'T9-mismatch-retry');
+          continue;
+        }
+        console.error('T9 FAIL: downloaded image is not from this prompt');
+        process.exitCode = 3;
+        return null;
+      }
+
       const afterImgs = await listImages(page);
       const newIdx = afterImgs.length - 1;
-      console.log(`\nAuto-downloading image [${newIdx}]...`);
+      console.log(`\nAuto-downloading image [${newIdx}] (verified: from this prompt)...`);
       const dest = await downloadImage(page, type, newIdx);
+
+      // T8: QA gate
+      if (dest) {
+        const qa = qaGate(dest);
+        if (!qa.pass) {
+          console.error(`QA FAIL: ${qa.reason}`);
+          heartbeat(taskId || '#13', 90, `QA-fail: ${qa.reason}`);
+          // Don't delete — let caller inspect, but warn
+        } else {
+          console.log(`QA PASS: ${qa.sizeKB}KB`);
+        }
+      }
+
       heartbeat(taskId || '#13', 100, 'done');
       return dest;
     }
@@ -431,36 +582,40 @@ async function status(page) {
     const url = window.location.href;
     return { title, url, imageCount: imgs.length };
   });
+  const max = cfg.max_chat_images || 40;
+  const pct = Math.round((info.imageCount / max) * 100);
   console.log(`Tab: ${info.title}`);
   console.log(`URL: ${info.url}`);
-  console.log(`DALL-E images: ${info.imageCount}`);
+  console.log(`DALL-E images: ${info.imageCount}/${max} (${pct}%)${info.imageCount >= max ? ' ⚠️ ROTATE NEEDED' : ''}`);
 }
 
 async function main() {
   const [,, cmd, ...args] = process.argv;
 
   if (!cmd || cmd === 'help') {
-    console.log(`Poster CLI v3 — ChatGPT DALL-E poster generation via CDP
+    console.log(`Poster CLI v3.1 — ChatGPT DALL-E poster generation via CDP
 
 Commands:
-  status              Check ChatGPT tab status
-  generate <type> <brief>  Generate poster with auto-recovery
+  status              Check ChatGPT tab status + image count
+  generate <type> <brief>  Generate poster (full pipeline: rotate→gen→verify→QA)
   prompt <text>       Send raw prompt to ChatGPT
   wait [taskId]       Wait for current generation (with heartbeat)
   download [prefix] [index]  Download image by index (default: latest)
   download-all [prefix]      Download ALL images in conversation
   images              List all DALL-E images with index numbers
+  roll-brand          Force rotate to fresh brand chat
 
 Types: atw (Around The World), mb (Market Brief), fund (Fund Holdings), raw (custom prompt)
 
-Recovery: auto-refresh on stall (${cfg.stall_threshold_polls} flat polls → reload → retry)
-Refusal: EN+THAI detection → reframe → retry once (exit code 2 if final)
+Pipeline: T6 rotate (≥${cfg.max_chat_images} imgs) → generate → T9 verify (DOM adjacency)
+          → download (3 fallbacks) → T8 QA gate (size check) → done
+Recovery: T1 stall (${cfg.stall_threshold_polls} flat → reload, stable baseline) | T2 refusal → reframe
+Exit codes: 0=ok, 2=refused, 3=T9 wrong-image
 Config: ${CONFIG_PATH}
 
 Examples:
   node poster.js generate atw "China sanctions + Thai FDI +73%"
-  node poster.js generate raw "A beautiful sunset poster"
-  node poster.js download atw-05jul
+  node poster.js roll-brand
   node poster.js status`);
     return;
   }
@@ -493,6 +648,9 @@ Examples:
         dalleImgs.forEach((img, i) => console.log(`  [${i}] ${img.w}x${img.h} ${img.alt || img.src}`));
         break;
       }
+      case 'roll-brand': case 'rotate':
+        await rollBrandChat(page);
+        break;
       default:
         console.error(`Unknown command: ${cmd}. Run with 'help'.`);
     }
