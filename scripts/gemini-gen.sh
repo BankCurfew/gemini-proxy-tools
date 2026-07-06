@@ -128,57 +128,39 @@ if [ -n "$RESULT" ]; then
   echo "[OK] $RESULT"
 
   if [ -n "$DL_PREFIX" ]; then
-    # Wait for image to render in DOM (Gemini reports loading=false before image appears)
-    echo "[~] Waiting 10s for image render..."
-    sleep 10
-
-    # Retry download_images up to 3 times (image may take time to render)
+    # T032 option A: Chrome auto-downloads generated images — find + rename
+    # Wait for auto-download to land (Chrome saves blob → Downloads)
+    echo "[~] Waiting for auto-download..."
+    DL_DIR="/mnt/c/Users/${USER}/Downloads"
     DL_OK=false
-    for attempt in 1 2 3; do
-      DL_CMD_ID="dl_${ID}_${attempt}"
-      mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
-      sleep 0.5
-      _mqtt_start=$(date +%s%3N)
-      DL_RESULT=$(timeout 15 mosquitto_sub -t 'claude/browser/response' -C 1 -W 12 2>/dev/null < <(
-        sleep 0.5
-        mosquitto_pub -t 'claude/browser/command' \
-          -m "{\"action\":\"download_images\",\"prefix\":\"${DL_PREFIX}\",\"tabId\":$TAB_ID,\"id\":\"${DL_CMD_ID}\",\"ts\":$(date +%s%3N)}"
-      ) 2>/dev/null || echo "{}")
-      mqtt_log "download" "claude/browser/response" "attempt=$attempt" "$(( $(date +%s%3N) - _mqtt_start ))"
-      DL_COUNT=$(echo "$DL_RESULT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('downloaded',0))" 2>/dev/null || echo "0")
-      if [ "$DL_COUNT" -gt 0 ] 2>/dev/null; then
-        # T032: verify downloaded file is fresh (not stale from previous gen)
-        # Wait for WSL→Windows filesystem sync before checking mtime
-        DL_DIR="/mnt/c/Users/${USER}/Downloads"
-        STALE_CHECK=false
-        for check_try in 1 2 3; do
-          sleep 2
-          NEWEST=$(ls -t "${DL_DIR}/${DL_PREFIX}"* 2>/dev/null | head -1)
-          if [ -n "$NEWEST" ]; then
-            FILE_MTIME=$(stat -c %Y "$NEWEST" 2>/dev/null || echo 0)
-            if [ "$FILE_MTIME" -ge "$GEN_START" ]; then
-              STALE_CHECK=false
-              break
-            fi
-            STALE_CHECK=true
-          fi
-        done
-        if [ "$STALE_CHECK" = "true" ]; then
-          echo "[!] STALE — downloaded file predates this generation (mtime=$FILE_MTIME < start=$GEN_START)"
-          echo "[!] Gemini likely responded with text only; image is from a previous run"
-          exit 1
+    for attempt in 1 2 3 4 5 6; do
+      sleep 3
+      # Find newest image file (any common format) with mtime > GEN_START
+      NEWEST=$(find "$DL_DIR" -maxdepth 1 -type f \( -name '*.jpg' -o -name '*.jpeg' -o -name '*.png' -o -name '*.webp' \) -newer "/proc/$$" 2>/dev/null | head -1)
+      # Fallback: check by mtime comparison
+      if [ -z "$NEWEST" ]; then
+        NEWEST=$(ls -t "$DL_DIR"/*.{jpg,jpeg,png,webp} 2>/dev/null | head -1)
+        if [ -n "$NEWEST" ]; then
+          FILE_MTIME=$(stat -c %Y "$NEWEST" 2>/dev/null || echo 0)
+          [ "$FILE_MTIME" -lt "$GEN_START" ] && NEWEST=""
         fi
-        echo "[OK] Downloaded $DL_COUNT image(s) to Windows Downloads"
-        echo "[!] Files land in /mnt/c/Users/\$USER/Downloads/"
+      fi
+      if [ -n "$NEWEST" ]; then
+        EXT="${NEWEST##*.}"
+        TARGET="${DL_DIR}/${DL_PREFIX}.${EXT}"
+        if [ "$NEWEST" != "$TARGET" ]; then
+          mv "$NEWEST" "$TARGET" 2>/dev/null && echo "[OK] Renamed to ${DL_PREFIX}.${EXT}" || TARGET="$NEWEST"
+        fi
+        echo "[OK] Image: $TARGET"
+        echo "[!] Files in /mnt/c/Users/\$USER/Downloads/"
         DL_OK=true
         break
       fi
-      echo "[~] No images yet (attempt $attempt/3), waiting 5s..."
-      sleep 5
+      printf "  (%ds · waiting for download...)\r" "$((attempt * 3))" >&2
     done
 
     if [ "$DL_OK" != "true" ]; then
-      echo "[!] No images found — Gemini may have responded with text only"
+      echo "[!] No fresh image found — Gemini may have responded with text only"
       exit 1
     fi
 
