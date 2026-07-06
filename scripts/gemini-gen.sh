@@ -148,15 +148,25 @@ if [ -n "$RESULT" ]; then
       DL_COUNT=$(echo "$DL_RESULT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('downloaded',0))" 2>/dev/null || echo "0")
       if [ "$DL_COUNT" -gt 0 ] 2>/dev/null; then
         # T032: verify downloaded file is fresh (not stale from previous gen)
+        # Wait for WSL→Windows filesystem sync before checking mtime
         DL_DIR="/mnt/c/Users/${USER}/Downloads"
-        NEWEST=$(ls -t "${DL_DIR}/${DL_PREFIX}"* 2>/dev/null | head -1)
-        if [ -n "$NEWEST" ]; then
-          FILE_MTIME=$(stat -c %Y "$NEWEST" 2>/dev/null || echo 0)
-          if [ "$FILE_MTIME" -lt "$GEN_START" ]; then
-            echo "[!] STALE — downloaded file predates this generation (mtime=$FILE_MTIME < start=$GEN_START)"
-            echo "[!] Gemini likely responded with text only; image is from a previous run"
-            exit 1
+        STALE_CHECK=false
+        for check_try in 1 2 3; do
+          sleep 2
+          NEWEST=$(ls -t "${DL_DIR}/${DL_PREFIX}"* 2>/dev/null | head -1)
+          if [ -n "$NEWEST" ]; then
+            FILE_MTIME=$(stat -c %Y "$NEWEST" 2>/dev/null || echo 0)
+            if [ "$FILE_MTIME" -ge "$GEN_START" ]; then
+              STALE_CHECK=false
+              break
+            fi
+            STALE_CHECK=true
           fi
+        done
+        if [ "$STALE_CHECK" = "true" ]; then
+          echo "[!] STALE — downloaded file predates this generation (mtime=$FILE_MTIME < start=$GEN_START)"
+          echo "[!] Gemini likely responded with text only; image is from a previous run"
+          exit 1
         fi
         echo "[OK] Downloaded $DL_COUNT image(s) to Windows Downloads"
         echo "[!] Files land in /mnt/c/Users/\$USER/Downloads/"
