@@ -85,6 +85,20 @@ else
   mqtt_log "get_state" "claude/browser/response" "count=$INITIAL_COUNT" "$(( $(date +%s%3N) - _mqtt_start ))"
 fi
 
+# FIX 2: Capture existing image set BEFORE sending prompt (new-image guard)
+PRE_IMG_COUNT=0
+if [ -n "$DL_PREFIX" ] && [ "$NEW_CHAT" != "true" ]; then
+  mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null; sleep 0.3
+  PRE_IMG_DATA=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 8 2>/dev/null < <(
+    sleep 0.5
+    mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"chatgpt_get_images\",\"tabId\":$TAB_ID,\"id\":\"pre_${ID}\",\"ts\":$(date +%s%3N)}"
+  ) 2>/dev/null || echo "{}")
+  PRE_IMG_COUNT=$(echo "$PRE_IMG_DATA" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('count',0))" 2>/dev/null || echo "0")
+  echo "[pre] Existing images in chat: $PRE_IMG_COUNT"
+elif [ -n "$DL_PREFIX" ]; then
+  echo "[pre] New chat — pre-send image count: 0"
+fi
+
 # Send prompt
 EXTRA=",\"tabId\":$TAB_ID"
 [ "$NEW_CHAT" = "true" ] && EXTRA="$EXTRA,\"newChat\":true"
@@ -139,18 +153,19 @@ print(text[:500])
     # Gate: re-verify extension is still alive before image polling
     _ping_attempt "gate_${ID}" 1
     if [ "$PING_OK" != "ok" ]; then
+      echo "[RESULT:extension_offline]"
       echo "[!] EXTENSION OFFLINE — lost connection after prompt was sent"
       echo "[!] Fix: reload extension at chrome://extensions/ then retry"
-      echo "[!] This is NOT a DALL-E limit — the extension cannot read the page"
       exit 1
     fi
 
-    # DALL-E images take longer — poll for images (up to 90s)
+    # FIX 1: Poll for NEW images (300s timeout, placeholder-aware)
     echo "[~] Waiting for DALL-E image to appear..."
     DL_OK=false
+    OUTCOME=""
     IMG_WAIT=0
-    while [ $IMG_WAIT -lt 90 ]; do
-      # Check if images exist yet
+    IMG_TIMEOUT=300
+    while [ $IMG_WAIT -lt $IMG_TIMEOUT ]; do
       IMG_CHK_ID="imgchk_${ID}_${IMG_WAIT}"
       mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
       sleep 0.3
@@ -163,10 +178,13 @@ print(text[:500])
       mqtt_log "get_images" "claude/browser/response" "check_${IMG_WAIT}s" "$(( $(date +%s%3N) - _mqtt_start ))"
       IMG_COUNT=$(echo "$IMG_CHK" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('count',0))" 2>/dev/null || echo "0")
 
-      if [ "$IMG_COUNT" -gt 0 ] 2>/dev/null; then
-        echo "[~] Found $IMG_COUNT image(s), downloading..."
+      # FIX 2: Only trigger on NEW images (count > pre-send count)
+      if [ "$IMG_COUNT" -gt "$PRE_IMG_COUNT" ] 2>/dev/null; then
+        NEW_IMG_COUNT=$((IMG_COUNT - PRE_IMG_COUNT))
+        echo "[~] Found $NEW_IMG_COUNT NEW image(s) (total: $IMG_COUNT, pre-send: $PRE_IMG_COUNT), downloading..."
         sleep 2
-        # Download
+
+        # Download only NEW images — pass startIndex to skip pre-existing
         DL_CMD_ID="dl_${ID}"
         mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
         sleep 0.5
@@ -174,58 +192,88 @@ print(text[:500])
         DL_RESULT=$(timeout 20 mosquitto_sub -t 'claude/browser/response' -C 1 -W 18 2>/dev/null < <(
           sleep 0.5
           mosquitto_pub -t 'claude/browser/command' \
-            -m "{\"action\":\"chatgpt_download_images\",\"prefix\":\"${DL_PREFIX}\",\"latest\":true,\"tabId\":$TAB_ID,\"id\":\"${DL_CMD_ID}\",\"ts\":$(date +%s%3N)}"
+            -m "{\"action\":\"chatgpt_download_images\",\"prefix\":\"${DL_PREFIX}\",\"latest\":true,\"startIndex\":${PRE_IMG_COUNT},\"tabId\":$TAB_ID,\"id\":\"${DL_CMD_ID}\",\"ts\":$(date +%s%3N)}"
         ) 2>/dev/null || echo "{}")
         DL_COUNT=$(echo "$DL_RESULT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('downloaded',0))" 2>/dev/null || echo "0")
         mqtt_log "download" "claude/browser/response" "dl_count=$DL_COUNT" "$(( $(date +%s%3N) - _mqtt_start ))"
         if [ "$DL_COUNT" -gt 0 ] 2>/dev/null; then
-          echo "[OK] Downloaded $DL_COUNT image(s) to Windows Downloads"
-          echo "[!] Files land in /mnt/c/Users/\$USER/Downloads/"
           DL_OK=true
+          OUTCOME="image_new"
         fi
         break
       fi
 
-      # After 30s with no images, check response text for guardrail refusal
-      if [ "$IMG_WAIT" -eq 30 ]; then
-        GR_CHK_ID="grchk_${ID}"
+      # FIX 1: Check if DALL-E is still generating (placeholder/loading in DOM)
+      IS_GENERATING=false
+      if [ $((IMG_WAIT % 15)) -eq 0 ] && [ $IMG_WAIT -gt 0 ]; then
+        GEN_CHK_ID="genchk_${ID}_${IMG_WAIT}"
         mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
         sleep 0.3
-        GR_RESP=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -C 1 -W 6 2>/dev/null < <(
+        GEN_STATE=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -C 1 -W 6 2>/dev/null < <(
           sleep 0.5
           mosquitto_pub -t 'claude/browser/command' \
-            -m "{\"action\":\"chatgpt_get_state\",\"tabId\":$TAB_ID,\"id\":\"${GR_CHK_ID}\",\"ts\":$(date +%s%3N)}"
+            -m "{\"action\":\"chatgpt_get_state\",\"tabId\":$TAB_ID,\"id\":\"${GEN_CHK_ID}\",\"ts\":$(date +%s%3N)}"
         ) 2>/dev/null || echo "{}")
-        GR_TEXT=$(echo "$GR_RESP" | python3 -c "
+        STILL_LOADING=$(echo "$GEN_STATE" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('True' if d.get('loading') else 'False')" 2>/dev/null || echo "False")
+        if [ "$STILL_LOADING" = "True" ]; then
+          IS_GENERATING=true
+          echo "  [~] DALL-E still generating (loading=true at ${IMG_WAIT}s)..." >&2
+        fi
+
+        # Check for guardrail refusal (every 30s)
+        if [ $((IMG_WAIT % 30)) -eq 0 ]; then
+          GR_TEXT=$(echo "$GEN_STATE" | python3 -c "
 import sys,json
 d=json.loads(sys.stdin.read())
 print(d.get('lastResponse','') or d.get('responseText','') or '')
 " 2>/dev/null || echo "")
-        if echo "$GR_TEXT" | grep -qiE '(violate.*guardrail|content policy|cannot generate|unable to create|I can.t create|not able to generate|against.*policy|image generation.*blocked|declined to generate|similarity to third-party)'; then
-          echo ""
-          echo "[!] DALL-E REFUSED — guardrail violation detected at 30s check"
-          echo "[!] Response: ${GR_TEXT:0:200}"
-          exit 1
+          if echo "$GR_TEXT" | grep -qiE '(violate.*guardrail|content policy|cannot generate|unable to create|I can.t create|not able to generate|against.*policy|image generation.*blocked|declined to generate|similarity to third-party)'; then
+            echo ""
+            OUTCOME="refusal"
+            echo "[RESULT:refusal]"
+            echo "[!] DALL-E REFUSED — guardrail violation detected at ${IMG_WAIT}s"
+            echo "[!] Response: ${GR_TEXT:0:200}"
+            exit 1
+          fi
         fi
       fi
 
-      printf "(%ds · waiting for DALL-E · timeout 90s)\r" "$IMG_WAIT" >&2
+      printf "(%ds · waiting for DALL-E · timeout %ds%s)\r" "$IMG_WAIT" "$IMG_TIMEOUT" "$([ "$IS_GENERATING" = "true" ] && echo ' · generating')" >&2
       sleep 5
       IMG_WAIT=$((IMG_WAIT + 5))
     done
 
-    if [ "$DL_OK" != "true" ]; then
-      # Re-check extension liveness to distinguish offline vs text-only
+    # FIX 3: Clear return types on failure
+    if [ "$DL_OK" != "true" ] && [ -z "$OUTCOME" ]; then
       _ping_attempt "failchk_${ID}" 1
       if [ "$PING_OK" != "ok" ]; then
+        OUTCOME="extension_offline"
+        echo "[RESULT:extension_offline]"
         echo "[!] EXTENSION OFFLINE — count=0 because extension lost connection, NOT a DALL-E limit"
         echo "[!] Fix: reload extension at chrome://extensions/ then retry"
       else
-        echo "[!] No images found after 90s — DALL-E responded with text only (no image generated)"
-        echo "[!] Check: open the ChatGPT tab and verify visually what was rendered"
+        # Check if it was still generating when we timed out
+        FINAL_STATE=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -C 1 -W 6 2>/dev/null < <(
+          sleep 0.5
+          mosquitto_pub -t 'claude/browser/command' \
+            -m "{\"action\":\"chatgpt_get_state\",\"tabId\":$TAB_ID,\"id\":\"final_${ID}\",\"ts\":$(date +%s%3N)}"
+        ) 2>/dev/null || echo "{}")
+        FINAL_LOADING=$(echo "$FINAL_STATE" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('True' if d.get('loading') else 'False')" 2>/dev/null || echo "False")
+        if [ "$FINAL_LOADING" = "True" ]; then
+          OUTCOME="timeout_still_generating"
+          echo "[RESULT:timeout_still_generating]"
+          echo "[!] DALL-E still generating after ${IMG_TIMEOUT}s — image may appear soon, check the tab"
+        else
+          OUTCOME="text_reply"
+          echo "[RESULT:text_reply]"
+          echo "[!] DALL-E responded with text only — no image generated"
+          echo "[!] Check the ChatGPT tab to see the response"
+        fi
       fi
       exit 1
     fi
+
+    echo "[RESULT:image_new]"
 
     # Default: keep chat for reuse (--cleanup to delete)
     if [ "$CLEANUP_CHAT" != "true" ]; then
