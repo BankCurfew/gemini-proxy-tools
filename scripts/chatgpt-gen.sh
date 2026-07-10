@@ -1,6 +1,7 @@
 #!/bin/bash
 # chatgpt-gen.sh — Generate image via ChatGPT/DALL-E
-# Usage: ./chatgpt-gen.sh "prompt" [--new] [--download prefix] [--tab ID] [--keep]
+# Usage: ./chatgpt-gen.sh "prompt" [--new] [--download prefix] [--tab ID] [--cleanup]
+# Default: reuse existing chat (--new only when changing context/project)
 # Mirrors gemini-gen.sh but for ChatGPT
 
 set -euo pipefail
@@ -8,16 +9,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/mqtt-log.sh"
 
-TEXT="${1:?Usage: chatgpt-gen.sh \"prompt\" [--new] [--download prefix] [--tab ID] [--keep] [--verbose]}"
+TEXT="${1:?Usage: chatgpt-gen.sh \"prompt\" [--new] [--download prefix] [--tab ID] [--cleanup] [--verbose]}"
 shift
 NEW_CHAT=false
 DL_PREFIX=""
 TAB_ID=""
-KEEP_CHAT=false
+CLEANUP_CHAT=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --new) NEW_CHAT=true; shift;;
-    --keep) KEEP_CHAT=true; shift;;
+    --keep) shift;; # deprecated, keep is now the default
+    --cleanup) CLEANUP_CHAT=true; shift;;
     --tab) TAB_ID="$2"; shift 2;;
     --download) DL_PREFIX="${2:-chatgpt}"; shift 2;;
     --verbose) MQTT_VERBOSE=true; shift;;
@@ -134,6 +136,15 @@ print(text[:500])
       exit 1
     fi
 
+    # Gate: re-verify extension is still alive before image polling
+    _ping_attempt "gate_${ID}" 1
+    if [ "$PING_OK" != "ok" ]; then
+      echo "[!] EXTENSION OFFLINE — lost connection after prompt was sent"
+      echo "[!] Fix: reload extension at chrome://extensions/ then retry"
+      echo "[!] This is NOT a DALL-E limit — the extension cannot read the page"
+      exit 1
+    fi
+
     # DALL-E images take longer — poll for images (up to 90s)
     echo "[~] Waiting for DALL-E image to appear..."
     DL_OK=false
@@ -204,13 +215,21 @@ print(d.get('lastResponse','') or d.get('responseText','') or '')
     done
 
     if [ "$DL_OK" != "true" ]; then
-      echo "[!] No images found after 90s — DALL-E may have refused or responded with text only"
+      # Re-check extension liveness to distinguish offline vs text-only
+      _ping_attempt "failchk_${ID}" 1
+      if [ "$PING_OK" != "ok" ]; then
+        echo "[!] EXTENSION OFFLINE — count=0 because extension lost connection, NOT a DALL-E limit"
+        echo "[!] Fix: reload extension at chrome://extensions/ then retry"
+      else
+        echo "[!] No images found after 90s — DALL-E responded with text only (no image generated)"
+        echo "[!] Check: open the ChatGPT tab and verify visually what was rendered"
+      fi
       exit 1
     fi
 
-    # Auto-delete conversation (unless --keep)
-    if [ "$KEEP_CHAT" = "true" ]; then
-      echo "[~] Keeping conversation (--keep)"
+    # Default: keep chat for reuse (--cleanup to delete)
+    if [ "$CLEANUP_CHAT" != "true" ]; then
+      echo "[~] Chat kept for reuse (use --cleanup to delete)"
     else
       echo "[~] Cleaning up ChatGPT conversation..."
       sleep 1
