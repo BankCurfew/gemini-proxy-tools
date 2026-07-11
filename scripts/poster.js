@@ -32,6 +32,22 @@ try {
 } catch {}
 
 let BRAND_CHAT_URL = `${cfg.chatgpt_url}/c/${cfg.brand_chat_id}`;
+const FORK_CHAT_ID = cfg.fork_chat_id || null; // Set in config to gen in a forked chat
+const FORCE_FLAG = process.argv.includes('--force');
+const DRY_RUN = process.argv.includes('--dry-run');
+const FEED_LOG = path.join(process.env.HOME || '/home/curfew', '.oracle/feed.log');
+
+function logToFeed(chatId, promptHash, action) {
+  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const oracle = cfg.heartbeat_oracle || 'Designer-Oracle';
+  const line = `${ts} | ${oracle} | poster.js | ${action} | chat=${chatId} prompt_hash=${promptHash}\n`;
+  try { fs.appendFileSync(FEED_LOG, line); } catch {}
+}
+
+function promptHash(text) {
+  const crypto = require('crypto');
+  return crypto.createHash('md5').update(text).digest('hex').slice(0, 8);
+}
 
 // ── T7: Build BRAND_TEMPLATE at runtime from DocCon CLAUDE_brand_ci.md ──
 const BRAND_CI_PATH = path.join(
@@ -561,6 +577,40 @@ async function downloadAll(page, prefix) {
 async function generate(page, type, brief, taskId) {
   const dateStr = new Date().toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' });
 
+  // ── SAFEGUARD: Hard-block gen on live brand chat without fork ──
+  const currentUrl = page.url();
+  const isLiveBrandChat = currentUrl.includes(cfg.brand_chat_id);
+  if (isLiveBrandChat && !FORK_CHAT_ID) {
+    console.error('\n🚫 BLOCKED: Target is the LIVE brand chat (' + cfg.brand_chat_id.slice(0, 8) + ')');
+    console.error('   Generating here pollutes the brand chat แบงค์ uses on mobile.');
+    console.error('   Fix: set "fork_chat_id" in poster.config.json to a forked chat,');
+    console.error('   or run: node poster.js fork (creates a fork automatically)');
+    console.error('   This is a hard block — --force does NOT override.\n');
+    process.exitCode = 4;
+    return;
+  }
+
+  // ── SAFEGUARD: Warning for chats with >20 images ──
+  const imgCount = await getImageCount(page);
+  if (imgCount > 20 && !FORCE_FLAG) {
+    console.error('\n⚠️  WARNING: Chat has ' + imgCount + ' images — this looks like an active chat.');
+    console.error('   Use --force to proceed, or fork first.\n');
+    process.exitCode = 4;
+    return;
+  }
+
+  // ── SAFEGUARD: --dry-run ──
+  if (DRY_RUN) {
+    const chatId = currentUrl.match(/\/c\/([a-f0-9-]+)/)?.[1] || 'unknown';
+    console.log('\n🔍 DRY RUN — would generate but not sending:');
+    console.log('   Chat ID: ' + chatId);
+    console.log('   Image count: ' + imgCount);
+    console.log('   Type: ' + type);
+    console.log('   Brief: ' + (brief || '(none)').slice(0, 80));
+    console.log('   Fork ID: ' + (FORK_CHAT_ID || 'NOT SET — would be blocked'));
+    return;
+  }
+
   // T6: Pre-flight rotation check
   await rollBrandChat(page);
 
@@ -603,6 +653,9 @@ async function generate(page, type, brief, taskId) {
 
     const beforeCount = (await listImages(page)).length;
     console.log(`Generating ${type} poster (attempt ${attempt + 1}, baseline: ${beforeCount} images)...`);
+    // SAFEGUARD: log chat_id + prompt_hash before every send
+    const chatId = page.url().match(/\/c\/([a-f0-9-]+)/)?.[1] || 'unknown';
+    logToFeed(chatId, promptHash(prompt), `gen:${type}`);
     const sent = await sendPrompt(page, prompt);
     if (!sent) return null;
 
@@ -700,7 +753,7 @@ async function main() {
   const [,, cmd, ...args] = process.argv;
 
   if (!cmd || cmd === 'help') {
-    console.log(`Poster CLI v3.1 — ChatGPT DALL-E poster generation via CDP
+    console.log(`Poster CLI v3.2 — ChatGPT DALL-E poster generation via CDP
 
 Commands:
   status              Check ChatGPT tab status + image count
@@ -714,15 +767,24 @@ Commands:
 
 Types: atw (Around The World), mb (Market Brief), fund (Fund Holdings), raw (custom prompt)
 
+Flags:
+  --dry-run           Show chat ID + image count without sending
+  --force             Override >20 image warning (hard-block cannot be overridden)
+
+Safeguards:
+  🚫 HARD BLOCK: gen refuses if target = live brand chat without fork_chat_id in config
+  ⚠️  WARNING: gen warns if chat has >20 images (requires --force)
+  📝 LOGGING: every gen logs chat_id + prompt_hash to feed.log
+
 Pipeline: T6 rotate (≥${cfg.max_chat_images} imgs) → generate → T9 verify (DOM adjacency)
           → download (3 fallbacks) → T8 QA gate (size check) → done
 Recovery: T1 stall (${cfg.stall_threshold_polls} flat → reload, stable baseline) | T2 refusal → reframe
-Exit codes: 0=ok, 2=refused, 3=T9 wrong-image
+Exit codes: 0=ok, 2=refused, 3=T9 wrong-image, 4=blocked/warning
 Config: ${CONFIG_PATH}
 
 Examples:
   node poster.js generate atw "China sanctions + Thai FDI +73%"
-  node poster.js roll-brand
+  node poster.js generate atw "brief" --dry-run
   node poster.js status`);
     return;
   }
