@@ -24,6 +24,7 @@ const defaults = {
   stall_threshold_polls: 6,
   max_retries: 1,
   heartbeat_oracle: 'Designer-Oracle',
+  brands: {},
 };
 let cfg = { ...defaults };
 try {
@@ -31,8 +32,21 @@ try {
   cfg = { ...defaults, ...file };
 } catch {}
 
-let BRAND_CHAT_URL = `${cfg.chatgpt_url}/c/${cfg.brand_chat_id}`;
-const FORK_CHAT_ID = cfg.fork_chat_id || null; // Set in config to gen in a forked chat
+// --brand flag: select active brand
+const BRAND_FLAG = (() => {
+  const idx = process.argv.indexOf('--brand');
+  return idx >= 0 && process.argv[idx + 1] ? process.argv[idx + 1] : null;
+})();
+
+function getActiveBrandChatId() {
+  if (BRAND_FLAG && cfg.brands && cfg.brands[BRAND_FLAG]) {
+    return cfg.brands[BRAND_FLAG].chat_id;
+  }
+  return cfg.brand_chat_id;
+}
+
+let BRAND_CHAT_URL = `${cfg.chatgpt_url}/c/${getActiveBrandChatId()}`;
+const FORK_CHAT_ID = cfg.fork_chat_id || null;
 const FORCE_FLAG = process.argv.includes('--force');
 const DRY_RUN = process.argv.includes('--dry-run');
 const FEED_LOG = path.join(process.env.HOME || '/home/curfew', '.oracle/feed.log');
@@ -141,7 +155,8 @@ async function connect() {
     protocolTimeout: cfg.cdp_protocol_timeout,
   });
   const pages = await browser.pages();
-  let page = pages.find(p => p.url().includes(cfg.brand_chat_id));
+  const activeChatId = getActiveBrandChatId();
+  let page = pages.find(p => p.url().includes(activeChatId));
   if (!page) page = pages.find(p => p.url().includes('chatgpt.com/c/'));
   if (!page) page = pages.find(p => p.url().includes('chatgpt.com'));
 
@@ -150,7 +165,7 @@ async function connect() {
     page = await browser.newPage();
     await page.goto(BRAND_CHAT_URL, { waitUntil: 'networkidle2' });
     await sleep(3000);
-  } else if (!page.url().includes(cfg.brand_chat_id)) {
+  } else if (!page.url().includes(activeChatId)) {
     console.log('ChatGPT tab found but not brand chat. Navigating...');
     await page.goto(BRAND_CHAT_URL, { waitUntil: 'networkidle2' });
     await sleep(3000);
@@ -579,15 +594,33 @@ async function generate(page, type, brief, taskId) {
 
   // ── SAFEGUARD: Hard-block gen on live brand chat without fork ──
   const currentUrl = page.url();
-  const isLiveBrandChat = currentUrl.includes(cfg.brand_chat_id);
+  const activeChatId = getActiveBrandChatId();
+  const isLiveBrandChat = currentUrl.includes(cfg.brand_chat_id) && !BRAND_FLAG;
   if (isLiveBrandChat && !FORK_CHAT_ID) {
     console.error('\n🚫 BLOCKED: Target is the LIVE brand chat (' + cfg.brand_chat_id.slice(0, 8) + ')');
     console.error('   Generating here pollutes the brand chat แบงค์ uses on mobile.');
     console.error('   Fix: set "fork_chat_id" in poster.config.json to a forked chat,');
-    console.error('   or run: node poster.js fork (creates a fork automatically)');
+    console.error('   or use --brand <name> to target a specific brand chat.');
     console.error('   This is a hard block — --force does NOT override.\n');
     process.exitCode = 4;
     return;
+  }
+
+  // ── SAFEGUARD: Brand gate — gen must be in correct brand chat ──
+  if (BRAND_FLAG) {
+    const brandCfg = cfg.brands && cfg.brands[BRAND_FLAG];
+    if (!brandCfg || !brandCfg.chat_id) {
+      console.error(`\n🚫 BLOCKED: Brand "${BRAND_FLAG}" not configured. Run: node poster.js new-chat --brand ${BRAND_FLAG}\n`);
+      process.exitCode = 4;
+      return;
+    }
+    if (!currentUrl.includes(brandCfg.chat_id)) {
+      console.error(`\n🚫 BLOCKED: Current chat is not the ${BRAND_FLAG} brand chat.`);
+      console.error(`   Expected: ${brandCfg.chat_id.slice(0, 8)}...`);
+      console.error(`   Current: ${currentUrl}\n`);
+      process.exitCode = 4;
+      return;
+    }
   }
 
   // ── SAFEGUARD: Warning for chats with >20 images ──
@@ -749,6 +782,72 @@ async function status(page) {
   console.log(`DALL-E images: ${info.imageCount}/${max} (${pct}%)${info.imageCount >= max ? ' ⚠️ ROTATE NEEDED' : ''}`);
 }
 
+async function newChat(page, brandName) {
+  console.log(`[new-chat] Creating new ChatGPT chat for brand: ${brandName}`);
+
+  // Navigate directly to chatgpt.com home (bypass config navigation)
+  await page.goto('https://chatgpt.com/', { waitUntil: 'networkidle2' });
+  await sleep(2000);
+
+  // Check if already on a fresh chat (URL = chatgpt.com/ without /c/)
+  let url = page.url();
+  if (url.includes('/c/')) {
+    // Already in a chat — click "New chat" button
+    console.log('[new-chat] On existing chat, clicking New Chat...');
+    try {
+      await page.evaluate(() => {
+        const btn = document.querySelector('a[href="/"]') || document.querySelector('nav a[data-testid="create-new-chat-button"]');
+        if (btn) btn.click();
+      });
+      await sleep(2000);
+    } catch {}
+  }
+
+  // Send a seed message to create the chat (ChatGPT needs a message to assign /c/<id>)
+  const seed = `You are a brand poster designer for ${brandName}. Respond: "Ready for ${brandName} posters."`;
+  console.log('[new-chat] Sending seed message to create chat...');
+  await page.evaluate((text) => {
+    const textarea = document.querySelector('#prompt-textarea') || document.querySelector('textarea');
+    if (textarea) {
+      textarea.focus();
+      document.execCommand('insertText', false, text);
+      setTimeout(() => {
+        const btn = document.querySelector('[data-testid="send-button"]') || document.querySelector('button[aria-label="Send prompt"]');
+        if (btn) btn.click();
+      }, 500);
+    }
+  }, seed);
+
+  // Wait for URL to change to /c/<id>
+  console.log('[new-chat] Waiting for chat ID in URL...');
+  let chatId = null;
+  for (let i = 0; i < 30; i++) {
+    await sleep(1000);
+    url = page.url();
+    const match = url.match(/\/c\/([a-f0-9-]+)/);
+    if (match) {
+      chatId = match[1];
+      break;
+    }
+  }
+
+  if (!chatId) {
+    console.error('[new-chat] FAILED: Could not capture chat ID from URL after 30s');
+    console.error('[new-chat] Current URL:', page.url());
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log(`[new-chat] Chat ID captured: ${chatId}`);
+
+  // Save to config
+  if (!cfg.brands) cfg.brands = {};
+  cfg.brands[brandName] = { chat_id: chatId, created: new Date().toISOString() };
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf-8');
+  console.log(`[new-chat] Saved to poster.config.json: brands.${brandName}.chat_id = ${chatId}`);
+  console.log(`\n✅ Brand "${brandName}" ready. Use: node poster.js generate <type> <brief> --brand ${brandName}`);
+}
+
 async function main() {
   const [,, cmd, ...args] = process.argv;
 
@@ -758,6 +857,7 @@ async function main() {
 Commands:
   status              Check ChatGPT tab status + image count
   generate <type> <brief>  Generate poster (full pipeline: rotate→gen→verify→QA)
+  new-chat --brand <name>  Create new ChatGPT chat for brand + save chat_id
   prompt <text>       Send raw prompt to ChatGPT
   wait [taskId]       Wait for current generation (with heartbeat)
   download [prefix] [index]  Download image by index (default: latest)
@@ -768,6 +868,7 @@ Commands:
 Types: atw (Around The World), mb (Market Brief), fund (Fund Holdings), raw (custom prompt)
 
 Flags:
+  --brand <name>      Target specific brand (multi-brand config)
   --dry-run           Show chat ID + image count without sending
   --force             Override >20 image warning (hard-block cannot be overridden)
 
@@ -820,6 +921,16 @@ Examples:
       case 'roll-brand': case 'rotate':
         await rollBrandChat(page);
         break;
+      case 'new-chat': {
+        const brandName = BRAND_FLAG || args[0];
+        if (!brandName) {
+          console.error('Usage: poster.js new-chat --brand <name>');
+          process.exitCode = 1;
+          break;
+        }
+        await newChat(page, brandName);
+        break;
+      }
       default:
         console.error(`Unknown command: ${cmd}. Run with 'help'.`);
     }

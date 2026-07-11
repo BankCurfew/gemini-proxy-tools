@@ -1,6 +1,6 @@
 {
   "chatgpt_url": "https://chatgpt.com",
-  "brand_chat_id": "6a2e2fee-f228-83ec-a55a-e85f221d620f",
+  "brand_chat_id": "6a519da7-dda0-83ec-a8aa-e85d100986d5",
   "output_dir": "/mnt/c/Users/mbank/OneDrive/AIA/Posters",
   "downloads_dir": "/mnt/c/Users/mbank/Downloads",
   "cdp_url": "http://localhost:9222",
@@ -14,5 +14,12 @@
   "heartbeat_oracle": "Designer-Oracle",
   "qa_min_width": 768,
   "qa_min_height": 1024,
-  "qa_min_size_kb": 50
+  "qa_min_size_kb": 50,
+  "fork_chat_id": "6a519da7-dda0-83ec-a8aa-e85d100986d5",
+  "brands": {
+    "iagencyaia": {
+      "chat_id": "6a519da7-dda0-83ec-a8aa-e85d100986d5",
+      "created": "2026-06-01T00:00:00.000Z"
+    }
+  }
 }
