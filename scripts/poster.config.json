@@ -8,18 +8,22 @@
   "generation_timeout_ms": 180000,
   "poll_interval_ms": 5000,
   "stall_threshold_polls": 6,
-  "stall_stable_polls": 3,
   "max_retries": 1,
-  "max_chat_images": 40,
   "heartbeat_oracle": "Designer-Oracle",
-  "qa_min_width": 768,
-  "qa_min_height": 1024,
-  "qa_min_size_kb": 50,
-  "fork_chat_id": "6a519da7-dda0-83ec-a8aa-e85d100986d5",
   "brands": {
     "iagencyaia": {
       "chat_id": "6a519da7-dda0-83ec-a8aa-e85d100986d5",
       "created": "2026-06-01T00:00:00.000Z"
+    },
+    "wealthbanks": {
+      "chat_id": "6a524b60-cbcc-83ec-bb86-405a800155eb",
+      "created": "2026-07-11T13:55:50.663Z"
     }
-  }
+  },
+  "stall_stable_polls": 3,
+  "max_chat_images": 40,
+  "qa_min_width": 768,
+  "qa_min_height": 1024,
+  "qa_min_size_kb": 50,
+  "fork_chat_id": "6a519da7-dda0-83ec-a8aa-e85d100986d5"
 }

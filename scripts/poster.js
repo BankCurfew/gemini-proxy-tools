@@ -785,60 +785,98 @@ async function status(page) {
 async function newChat(page, brandName) {
   console.log(`[new-chat] Creating new ChatGPT chat for brand: ${brandName}`);
 
-  // Navigate directly to chatgpt.com home (bypass config navigation)
-  await page.goto('https://chatgpt.com/', { waitUntil: 'networkidle2' });
-  await sleep(2000);
+  // Open a NEW tab — bypass connect() which reuses existing ChatGPT tab
+  const browser = page.browser();
+  const newPage = await browser.newPage();
 
-  // Check if already on a fresh chat (URL = chatgpt.com/ without /c/)
-  let url = page.url();
-  if (url.includes('/c/')) {
-    // Already in a chat — click "New chat" button
-    console.log('[new-chat] On existing chat, clicking New Chat...');
+  // Navigate to chatgpt.com home (fresh chat state)
+  await newPage.goto('https://chatgpt.com/', { waitUntil: 'networkidle2', timeout: 30000 });
+  await sleep(3000);
+
+  // Verify we're on a clean home page, not redirected to an existing chat
+  let url = newPage.url();
+  const existingChatIds = Object.values(cfg.brands || {}).map(b => b.chat_id).filter(Boolean);
+  existingChatIds.push(cfg.brand_chat_id);
+
+  if (existingChatIds.some(id => url.includes(id))) {
+    console.log('[new-chat] Redirected to existing chat — forcing new via sidebar button...');
     try {
-      await page.evaluate(() => {
-        const btn = document.querySelector('a[href="/"]') || document.querySelector('nav a[data-testid="create-new-chat-button"]');
-        if (btn) btn.click();
+      await newPage.evaluate(() => {
+        const links = Array.from(document.querySelectorAll('a'));
+        const newBtn = links.find(a => a.href && a.href.endsWith('/') && a.textContent?.includes('New'));
+        if (newBtn) { newBtn.click(); return; }
+        const btn = document.querySelector('[data-testid="create-new-chat-button"]');
+        if (btn) { btn.click(); return; }
+        window.location.href = 'https://chatgpt.com/';
       });
-      await sleep(2000);
+      await sleep(3000);
     } catch {}
   }
 
-  // Send a seed message to create the chat (ChatGPT needs a message to assign /c/<id>)
-  const seed = `You are a brand poster designer for ${brandName}. Respond: "Ready for ${brandName} posters."`;
-  console.log('[new-chat] Sending seed message to create chat...');
-  await page.evaluate((text) => {
-    const textarea = document.querySelector('#prompt-textarea') || document.querySelector('textarea');
-    if (textarea) {
-      textarea.focus();
-      document.execCommand('insertText', false, text);
-      setTimeout(() => {
-        const btn = document.querySelector('[data-testid="send-button"]') || document.querySelector('button[aria-label="Send prompt"]');
-        if (btn) btn.click();
-      }, 500);
+  // Send seed message to create the chat
+  const seed = `You are a brand poster designer for ${brandName}. Respond only: "Ready for ${brandName} posters."`;
+  console.log('[new-chat] Sending seed message...');
+
+  const sent = await newPage.evaluate((text) => {
+    const el = document.querySelector('#prompt-textarea') || document.querySelector('[contenteditable="true"]');
+    if (!el) return false;
+    el.focus();
+    if (el.tagName === 'TEXTAREA') {
+      const nativeSet = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      if (nativeSet) { nativeSet.call(el, text); el.dispatchEvent(new Event('input', { bubbles: true })); }
+    } else {
+      el.textContent = text;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
     }
+    return true;
   }, seed);
+
+  if (!sent) {
+    console.error('[new-chat] FAILED: Could not find prompt textarea');
+    await newPage.close();
+    process.exitCode = 1;
+    return;
+  }
+
+  await sleep(1000);
+
+  // Click send button
+  await newPage.evaluate(() => {
+    const btn = document.querySelector('[data-testid="send-button"]')
+      || document.querySelector('button[aria-label="Send prompt"]')
+      || document.querySelector('button[data-testid="composer-send-button"]');
+    if (btn) btn.click();
+  });
 
   // Wait for URL to change to /c/<id>
   console.log('[new-chat] Waiting for chat ID in URL...');
   let chatId = null;
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 45; i++) {
     await sleep(1000);
-    url = page.url();
+    url = newPage.url();
     const match = url.match(/\/c\/([a-f0-9-]+)/);
-    if (match) {
+    if (match && !existingChatIds.includes(match[1])) {
       chatId = match[1];
       break;
     }
   }
 
   if (!chatId) {
-    console.error('[new-chat] FAILED: Could not capture chat ID from URL after 30s');
-    console.error('[new-chat] Current URL:', page.url());
+    // Last resort: check if URL has a chat ID even if it matches existing (could be coincidence)
+    const match = newPage.url().match(/\/c\/([a-f0-9-]+)/);
+    if (match && !existingChatIds.includes(match[1])) chatId = match[1];
+  }
+
+  if (!chatId) {
+    console.error('[new-chat] FAILED: Could not capture NEW chat ID from URL after 45s');
+    console.error('[new-chat] Current URL:', newPage.url());
+    console.error('[new-chat] Existing chat IDs:', existingChatIds.map(id => id.slice(0, 8)).join(', '));
+    await newPage.close();
     process.exitCode = 1;
     return;
   }
 
-  console.log(`[new-chat] Chat ID captured: ${chatId}`);
+  console.log(`[new-chat] NEW Chat ID captured: ${chatId}`);
 
   // Save to config
   if (!cfg.brands) cfg.brands = {};
@@ -846,6 +884,9 @@ async function newChat(page, brandName) {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf-8');
   console.log(`[new-chat] Saved to poster.config.json: brands.${brandName}.chat_id = ${chatId}`);
   console.log(`\n✅ Brand "${brandName}" ready. Use: node poster.js generate <type> <brief> --brand ${brandName}`);
+
+  // Keep the new tab open for Designer to use
+  console.log(`[new-chat] New tab kept open at: ${newPage.url()}`);
 }
 
 async function main() {
