@@ -177,6 +177,11 @@ print(text[:500])
       ) 2>/dev/null || echo "{}")
       mqtt_log "get_images" "claude/browser/response" "check_${IMG_WAIT}s" "$(( $(date +%s%3N) - _mqtt_start ))"
       IMG_COUNT=$(echo "$IMG_CHK" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('count',0))" 2>/dev/null || echo "0")
+      # Debug: log scan stats on first check and every 30s
+      if [ $((IMG_WAIT % 30)) -eq 0 ]; then
+        SCANNED=$(echo "$IMG_CHK" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(f'scanned={d.get(\"totalScanned\",\"?\")}')" 2>/dev/null || echo "")
+        [ -n "$SCANNED" ] && echo "  [debug] ${SCANNED} count=${IMG_COUNT} pre=${PRE_IMG_COUNT}" >&2
+      fi
 
       # FIX 2: Only trigger on NEW images (count > pre-send count)
       if [ "$IMG_COUNT" -gt "$PRE_IMG_COUNT" ] 2>/dev/null; then
