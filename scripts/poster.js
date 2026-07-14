@@ -212,14 +212,16 @@ async function rollBrandChat(page) {
   await sleep(1000);
 
   const typed = await page.evaluate((text) => {
-    const textarea = document.querySelector('#prompt-textarea, textarea[data-id], div[contenteditable="true"]');
-    if (!textarea) return false;
-    if (textarea.tagName === 'TEXTAREA') {
-      textarea.value = text;
-      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    const el = document.querySelector('#prompt-textarea, textarea[data-id], div[contenteditable="true"]');
+    if (!el) return false;
+    if (el.tagName === 'TEXTAREA') {
+      el.value = text;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
     } else {
-      textarea.innerText = text;
-      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      el.focus();
+      el.textContent = '';
+      document.execCommand('insertText', false, text);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
     }
     return true;
   }, primer);
@@ -227,8 +229,12 @@ async function rollBrandChat(page) {
   if (typed) {
     await sleep(300);
     await page.evaluate(() => {
-      const btn = document.querySelector('button[data-testid="send-button"], button[aria-label="Send prompt"]');
-      if (btn) btn.click();
+      const btn = document.querySelector('button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]');
+      if (btn && !btn.disabled) btn.click();
+      else {
+        const el = document.querySelector('#prompt-textarea');
+        if (el) el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+      }
     });
     await sleep(5000); // Wait for ack
   }
@@ -319,14 +325,24 @@ function qaGate(filePath) {
 
 async function sendPrompt(page, prompt) {
   const typed = await page.evaluate((text) => {
-    const textarea = document.querySelector('#prompt-textarea, textarea[data-id], div[contenteditable="true"]');
-    if (!textarea) return false;
-    if (textarea.tagName === 'TEXTAREA') {
-      textarea.value = text;
-      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    const el = document.querySelector('#prompt-textarea, textarea[data-id], div[contenteditable="true"]');
+    if (!el) return false;
+    if (el.tagName === 'TEXTAREA') {
+      el.value = text;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
     } else {
-      textarea.innerText = text;
-      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      // ProseMirror contentEditable (project chats) — ClipboardEvent paste
+      el.focus();
+      el.textContent = '';
+      const dt = new DataTransfer();
+      dt.setData('text/plain', text);
+      el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+      // Fallback: execCommand if paste didn't populate
+      if (!el.textContent || el.textContent.trim().length < 5) {
+        el.textContent = '';
+        document.execCommand('insertText', false, text);
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
     }
     return true;
   }, prompt);
@@ -339,13 +355,21 @@ async function sendPrompt(page, prompt) {
   await sleep(500);
 
   await page.evaluate(() => {
-    const btn = document.querySelector('button[data-testid="send-button"], button[aria-label="Send prompt"]');
-    if (btn) btn.click();
-    else {
-      const buttons = document.querySelectorAll('button');
+    // Broader send button detection — works in both regular and project chats
+    const btn = document.querySelector('button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]');
+    if (btn && !btn.disabled) { btn.click(); return; }
+    // Fallback: find enabled button with SVG arrow in the composer area
+    const form = document.querySelector('form, div[class*="composer"]');
+    if (form) {
+      const buttons = form.querySelectorAll('button:not([disabled])');
       for (const b of buttons) {
-        if (b.querySelector('svg') && b.closest('form')) { b.click(); break; }
+        if (b.querySelector('svg') || b.querySelector('path')) { b.click(); break; }
       }
+    }
+    // Last resort: Enter key on the input
+    const el = document.querySelector('#prompt-textarea');
+    if (el) {
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
     }
   });
 

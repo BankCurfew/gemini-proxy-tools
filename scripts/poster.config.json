@@ -1,6 +1,6 @@
 {
   "chatgpt_url": "https://chatgpt.com",
-  "brand_chat_id": "6a519da7-dda0-83ec-a8aa-e85d100986d5",
+  "brand_chat_id": "6a548998-bd58-83ec-8a8f-05470fdb0f93",
   "output_dir": "/mnt/c/Users/mbank/OneDrive/AIA/Posters",
   "downloads_dir": "/mnt/c/Users/mbank/Downloads",
   "cdp_url": "http://localhost:9222",
@@ -12,12 +12,12 @@
   "heartbeat_oracle": "Designer-Oracle",
   "brands": {
     "iagencyaia": {
-      "chat_id": "6a519da7-dda0-83ec-a8aa-e85d100986d5",
-      "created": "2026-06-01T00:00:00.000Z"
+      "chat_id": "6a563b91-47c4-83ec-9644-3170c33c85ef",
+      "created": "2026-07-14T13:37:31.304Z"
     },
     "wealthbanks": {
-      "chat_id": "6a524b60-cbcc-83ec-bb86-405a800155eb",
-      "created": "2026-07-11T13:55:50.663Z"
+      "chat_id": "6a56644e-1a54-83ec-b4ac-5489a33666f4",
+      "created": "2026-07-14T16:31:12.854Z"
     }
   },
   "stall_stable_polls": 3,
@@ -25,5 +25,8 @@
   "qa_min_width": 768,
   "qa_min_height": 1024,
   "qa_min_size_kb": 50,
-  "fork_chat_id": "6a519da7-dda0-83ec-a8aa-e85d100986d5"
+  "fork_chat_id": "6a548998-bd58-83ec-8a8f-05470fdb0f93",
+  "wealthbanks_chat_id": "6a524b60-cbcc-83ec-bb86-405a800155eb",
+  "iagencyaia_chat_id": "6a519da7-dda0-83ec-a8aa-e85d100986d5",
+  "iagencyaia_fork_id": "6a519da7-dda0-83ec-a8aa-e85d100986d5"
 }
