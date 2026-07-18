@@ -79,10 +79,19 @@ else
   mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
   sleep 0.3
   _mqtt_start=$(date +%s%3N)
-  INITIAL_COUNT=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 2>/dev/null < <(
+  ST_ID="st_${ID}"
+  INITIAL_COUNT=$(mosquitto_sub -t 'claude/browser/response' -W 5 2>/dev/null < <(
     sleep 1
-    mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"get_state\",\"tabId\":$TAB_ID,\"id\":\"st_${ID}\",\"ts\":$(date +%s%3N)}"
-  ) | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))" 2>/dev/null || echo "0")
+    mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"get_state\",\"tabId\":$TAB_ID,\"id\":\"${ST_ID}\",\"ts\":$(date +%s%3N)}"
+  ) | python3 -c "
+import sys,json
+for line in sys.stdin:
+    try:
+        d=json.loads(line.strip())
+        if d.get('id')=='${ST_ID}' and 'responseCount' in d:
+            print(d['responseCount']); break
+    except: pass
+" 2>/dev/null || echo "0")
   mqtt_log "get_state" "claude/browser/response" "count=$INITIAL_COUNT" "$(( $(date +%s%3N) - _mqtt_start ))"
 fi
 
@@ -106,12 +115,20 @@ while [ $SECONDS -lt 90 ]; do
   mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
   sleep 0.3
   _mqtt_start=$(date +%s%3N)
-  # Subscribe first (background), then publish — ensures we catch the response
-  R=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -C 1 -W 6 2>/dev/null < <(
+  # Subscribe, then publish — filter responses by matching poll ID
+  R=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -W 6 2>/dev/null < <(
     sleep 1
     mosquitto_pub -t 'claude/browser/command' \
       -m "{\"action\":\"get_state\",\"tabId\":$TAB_ID,\"id\":\"${POLL_ID}\",\"ts\":$(date +%s%3N)}"
-  ) 2>/dev/null || echo "{}")
+  ) 2>/dev/null | python3 -c "
+import sys,json
+for line in sys.stdin:
+    try:
+        d=json.loads(line.strip())
+        if d.get('id')=='${POLL_ID}' and 'responseCount' in d:
+            print(json.dumps(d)); break
+    except: pass
+" 2>/dev/null || echo "{}")
   mqtt_log "poll" "claude/browser/response" "poll_${SECONDS}s" "$(( $(date +%s%3N) - _mqtt_start ))"
   COUNT=$(echo "$R" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))" 2>/dev/null || echo 0)
   LOADING=$(echo "$R" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('loading',False))" 2>/dev/null || echo False)
@@ -131,7 +148,8 @@ if [ -n "$RESULT" ]; then
     # T032 option A: Chrome auto-downloads generated images — find + rename
     # Wait for auto-download to land (Chrome saves blob → Downloads)
     echo "[~] Waiting for auto-download..."
-    DL_DIR="/mnt/c/Users/${USER}/Downloads"
+    WIN_PROFILE=$(cmd.exe /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r\n')
+    DL_DIR="$(wslpath "$WIN_PROFILE")/Downloads"
     DL_OK=false
     for attempt in 1 2 3 4 5 6; do
       sleep 3
