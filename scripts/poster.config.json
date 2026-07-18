@@ -3,7 +3,7 @@
   "brand_chat_id": "6a548998-bd58-83ec-8a8f-05470fdb0f93",
   "output_dir": "/mnt/c/Users/mbank/OneDrive/AIA/Posters",
   "downloads_dir": "/mnt/c/Users/mbank/Downloads",
-  "cdp_url": "http://localhost:9222",
+  "cdp_url": "http://127.0.0.1:9222",
   "cdp_protocol_timeout": 120000,
   "generation_timeout_ms": 180000,
   "poll_interval_ms": 5000,
@@ -12,12 +12,12 @@
   "heartbeat_oracle": "Designer-Oracle",
   "brands": {
     "iagencyaia": {
-      "chat_id": "6a563b91-47c4-83ec-9644-3170c33c85ef",
-      "created": "2026-07-14T13:37:31.304Z"
+      "chat_id": "6a5ad5d4-fcf4-83ec-a26b-dae3253fa8f8",
+      "created": "2026-07-18T01:24:41.796Z"
     },
     "wealthbanks": {
-      "chat_id": "6a56644e-1a54-83ec-b4ac-5489a33666f4",
-      "created": "2026-07-14T16:31:12.854Z"
+      "chat_id": "6a5a7d07-37b4-83ec-8adc-26f2bf6751dd",
+      "created": "2026-07-17T19:05:47.037Z"
     }
   },
   "stall_stable_polls": 3,

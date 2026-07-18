@@ -5,3 +5,9 @@ node_modules/
 *.p12
 *.pfx
 *.jks
+
+# Environment
+.env
+.env.*
+!.env.example
+!.env.sample

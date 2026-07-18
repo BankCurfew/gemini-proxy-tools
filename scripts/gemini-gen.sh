@@ -115,8 +115,8 @@ while [ $SECONDS -lt 90 ]; do
   mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
   sleep 0.3
   _mqtt_start=$(date +%s%3N)
-  # Subscribe, then publish — filter responses by matching poll ID
-  R=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -W 6 2>/dev/null < <(
+  # Subscribe, then publish — filter by poll ID, extract count+loading
+  POLL_RESULT=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -W 6 2>/dev/null < <(
     sleep 1
     mosquitto_pub -t 'claude/browser/command' \
       -m "{\"action\":\"get_state\",\"tabId\":$TAB_ID,\"id\":\"${POLL_ID}\",\"ts\":$(date +%s%3N)}"
@@ -126,12 +126,12 @@ for line in sys.stdin:
     try:
         d=json.loads(line.strip())
         if d.get('id')=='${POLL_ID}' and 'responseCount' in d:
-            print(json.dumps(d)); break
+            print(d.get('responseCount',0),d.get('loading',False)); break
     except: pass
-" 2>/dev/null || echo "{}")
+" 2>/dev/null || echo "0 False")
   mqtt_log "poll" "claude/browser/response" "poll_${SECONDS}s" "$(( $(date +%s%3N) - _mqtt_start ))"
-  COUNT=$(echo "$R" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('responseCount',0))" 2>/dev/null || echo 0)
-  LOADING=$(echo "$R" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('loading',False))" 2>/dev/null || echo False)
+  COUNT=$(echo "$POLL_RESULT" | head -1 | awk '{print $1}')
+  LOADING=$(echo "$POLL_RESULT" | head -1 | awk '{print $2}')
   if [ "$COUNT" -gt "$INITIAL_COUNT" ] && [ "$LOADING" = "False" ]; then
     RESULT="OK count:${COUNT}"
     break
