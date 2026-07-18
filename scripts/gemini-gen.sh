@@ -89,9 +89,9 @@ for line in sys.stdin:
     try:
         d=json.loads(line.strip())
         if d.get('id')=='${ST_ID}' and 'responseCount' in d:
-            print(d['responseCount']); break
+            print(d['responseCount']); sys.exit(0)
     except: pass
-" 2>/dev/null || echo "0")
+" 2>/dev/null | head -1 || echo "0")
   mqtt_log "get_state" "claude/browser/response" "count=$INITIAL_COUNT" "$(( $(date +%s%3N) - _mqtt_start ))"
 fi
 
@@ -126,12 +126,12 @@ for line in sys.stdin:
     try:
         d=json.loads(line.strip())
         if d.get('id')=='${POLL_ID}' and 'responseCount' in d:
-            print(d.get('responseCount',0),d.get('loading',False)); break
+            print(d.get('responseCount',0),d.get('loading',False)); sys.exit(0)
     except: pass
-" 2>/dev/null || echo "0 False")
+" 2>/dev/null | head -1 || echo "0 False")
   mqtt_log "poll" "claude/browser/response" "poll_${SECONDS}s" "$(( $(date +%s%3N) - _mqtt_start ))"
-  COUNT=$(echo "$POLL_RESULT" | head -1 | awk '{print $1}')
-  LOADING=$(echo "$POLL_RESULT" | head -1 | awk '{print $2}')
+  COUNT=$(echo "$POLL_RESULT" | awk '{print $1}')
+  LOADING=$(echo "$POLL_RESULT" | awk '{print $2}')
   if [ "$COUNT" -gt "$INITIAL_COUNT" ] && [ "$LOADING" = "False" ]; then
     RESULT="OK count:${COUNT}"
     break
