@@ -72,28 +72,7 @@ fi
 echo "[tab:$TAB_ID]"
 
 # For --new chat, set initial count to 0 since newChat resets the page
-if [ "$NEW_CHAT" = "true" ]; then
-  INITIAL_COUNT=0
-else
-  # Get initial response count from THIS specific tab
-  mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
-  sleep 0.3
-  _mqtt_start=$(date +%s%3N)
-  ST_ID="st_${ID}"
-  INITIAL_COUNT=$(mosquitto_sub -t 'claude/browser/response' -W 5 2>/dev/null < <(
-    sleep 1
-    mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"get_state\",\"tabId\":$TAB_ID,\"id\":\"${ST_ID}\",\"ts\":$(date +%s%3N)}"
-  ) | python3 -c "
-import sys,json
-for line in sys.stdin:
-    try:
-        d=json.loads(line.strip())
-        if d.get('id')=='${ST_ID}' and 'responseCount' in d:
-            print(d['responseCount']); sys.exit(0)
-    except: pass
-" 2>/dev/null | head -1 || echo "0")
-  mqtt_log "get_state" "claude/browser/response" "count=$INITIAL_COUNT" "$(( $(date +%s%3N) - _mqtt_start ))"
-fi
+# wait_response handles response detection internally — no initial count needed
 
 # T032: capture gen-start timestamp for stale-download detection
 GEN_START=$(date +%s)
@@ -105,40 +84,36 @@ _mqtt_start=$(date +%s%3N)
 mosquitto_pub -t 'claude/browser/command' \
   -m "{\"action\":\"chat\",\"text\":$(printf '%s' "$TEXT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"id\":\"${ID}\"${EXTRA},\"ts\":$(date +%s%3N)}"
 mqtt_log "chat" "claude/browser/command" "sent" "$(( $(date +%s%3N) - _mqtt_start ))"
-echo "[>] Sent (initial responses: $INITIAL_COUNT)"
+echo "[>] Sent"
 
-# Poll state on PINNED tab until responseCount increases
-SECONDS=0
+# Wait for Gemini to respond using wait_response (runs inside extension, monitors DOM)
+# newChat needs extra time for page navigation + init before wait_response works
+[ "$NEW_CHAT" = "true" ] && sleep 6 || sleep 2
+WAIT_ID="wait_${ID}"
+_mqtt_start=$(date +%s%3N)
+echo "[~] Waiting for response (90s)..."
+_TMP=$(mktemp)
+timeout 95 mosquitto_sub -t 'claude/browser/answer' -t 'claude/browser/response' -W 92 2>/dev/null < <(
+  sleep 1
+  mosquitto_pub -t 'claude/browser/command' \
+    -m "{\"action\":\"wait_response\",\"timeout\":85000,\"tabId\":$TAB_ID,\"id\":\"${WAIT_ID}\",\"ts\":$(date +%s%3N)}"
+) > "$_TMP" 2>/dev/null || true
+mqtt_log "wait" "claude/browser/answer" "wait" "$(( $(date +%s%3N) - _mqtt_start ))"
+
 RESULT=""
-while [ $SECONDS -lt 90 ]; do
-  POLL_ID="poll_$(date +%s%3N)"
-  mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
-  sleep 0.3
-  _mqtt_start=$(date +%s%3N)
-  # Subscribe, then publish — filter by poll ID, extract count+loading
-  POLL_RESULT=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -W 6 2>/dev/null < <(
-    sleep 1
-    mosquitto_pub -t 'claude/browser/command' \
-      -m "{\"action\":\"get_state\",\"tabId\":$TAB_ID,\"id\":\"${POLL_ID}\",\"ts\":$(date +%s%3N)}"
-  ) 2>/dev/null | python3 -c "
-import sys,json
-for line in sys.stdin:
+if python3 -c "
+import json
+for line in open('${_TMP}'):
     try:
         d=json.loads(line.strip())
-        if d.get('id')=='${POLL_ID}' and 'responseCount' in d:
-            print(d.get('responseCount',0),d.get('loading',False)); sys.exit(0)
+        if d.get('answer') or (d.get('id')=='${WAIT_ID}' and d.get('success')):
+            print('OK'); exit(0)
     except: pass
-" 2>/dev/null | head -1 || echo "0 False")
-  mqtt_log "poll" "claude/browser/response" "poll_${SECONDS}s" "$(( $(date +%s%3N) - _mqtt_start ))"
-  COUNT=$(echo "$POLL_RESULT" | awk '{print $1}')
-  LOADING=$(echo "$POLL_RESULT" | awk '{print $2}')
-  if [ "$COUNT" -gt "$INITIAL_COUNT" ] && [ "$LOADING" = "False" ]; then
-    RESULT="OK count:${COUNT}"
-    break
-  fi
-  printf "(%ds · timeout 90s)\r" "$SECONDS" >&2
-  sleep 2
-done
+exit(1)
+" 2>/dev/null; then
+  RESULT="OK"
+fi
+rm -f "$_TMP"
 
 if [ -n "$RESULT" ]; then
   echo ""
