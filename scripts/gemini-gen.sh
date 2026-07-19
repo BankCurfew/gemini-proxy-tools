@@ -34,10 +34,21 @@ _ping_attempt() {
   mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
   sleep 0.3
   _mqtt_start=$(date +%s%3N)
-  PING=$(mosquitto_sub -t 'claude/browser/response' -C 1 -W 5 2>/dev/null < <(
+  local _ptmp=$(mktemp)
+  timeout 8 mosquitto_sub -t 'claude/browser/response' -C 5 -W 6 2>/dev/null < <(
     sleep "$delay"
     mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"list_tabs\",\"id\":\"${attempt_id}\",\"ts\":$(date +%s%3N)}"
-  ) 2>/dev/null || echo '{}')
+  ) > "$_ptmp" 2>/dev/null || true
+  PING=$(python3 -c "
+import json
+for line in open('${_ptmp}'):
+    try:
+        d=json.loads(line.strip())
+        if d.get('id')=='${attempt_id}' and d.get('tabs'):
+            print(json.dumps(d)); break
+    except: pass
+" 2>/dev/null || echo '{}')
+  rm -f "$_ptmp"
   mqtt_log "ping" "claude/browser/response" "$([ -n "$PING" ] && echo ok || echo empty)" "$(( $(date +%s%3N) - _mqtt_start ))"
   PING_OK=$(echo "$PING" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('ok' if d.get('success') else 'fail')" 2>/dev/null || echo "fail")
 }
@@ -77,37 +88,34 @@ echo "[tab:$TAB_ID]"
 # T032: capture gen-start timestamp for stale-download detection
 GEN_START=$(date +%s)
 
-# Build and send chat to PINNED tab
-EXTRA=",\"tabId\":$TAB_ID"
-[ "$NEW_CHAT" = "true" ] && EXTRA="$EXTRA,\"newChat\":true"
-_mqtt_start=$(date +%s%3N)
-mosquitto_pub -t 'claude/browser/command' \
-  -m "{\"action\":\"chat\",\"text\":$(printf '%s' "$TEXT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"id\":\"${ID}\"${EXTRA},\"ts\":$(date +%s%3N)}"
-mqtt_log "chat" "claude/browser/command" "sent" "$(( $(date +%s%3N) - _mqtt_start ))"
-echo "[>] Sent"
-
-# Wait for Gemini to respond using wait_response (runs inside extension, monitors DOM)
-# newChat needs extra time for page navigation + init before wait_response works
-[ "$NEW_CHAT" = "true" ] && sleep 6 || sleep 2
+# Atomic chat_and_wait: captures DOM state → types → sends → waits for response change
+EXTRA_JSON=""
+[ "$NEW_CHAT" = "true" ] && EXTRA_JSON=",\"newChat\":true"
 WAIT_ID="wait_${ID}"
 _mqtt_start=$(date +%s%3N)
-echo "[~] Waiting for response (90s)..."
+echo "[~] Sending + waiting (90s)... [tab:$TAB_ID]"
 _TMP=$(mktemp)
 timeout 95 mosquitto_sub -t 'claude/browser/answer' -t 'claude/browser/response' -W 92 2>/dev/null < <(
   sleep 1
   mosquitto_pub -t 'claude/browser/command' \
-    -m "{\"action\":\"wait_response\",\"timeout\":85000,\"tabId\":$TAB_ID,\"id\":\"${WAIT_ID}\",\"ts\":$(date +%s%3N)}"
+    -m "{\"action\":\"chat_and_wait\",\"text\":$(printf '%s' "$TEXT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"tabId\":$TAB_ID,\"timeout\":85000,\"id\":\"${WAIT_ID}\"${EXTRA_JSON},\"ts\":$(date +%s%3N)}"
 ) > "$_TMP" 2>/dev/null || true
+mqtt_log "gen" "claude/browser/answer" "complete" "$(( $(date +%s%3N) - _mqtt_start ))"
 mqtt_log "wait" "claude/browser/answer" "wait" "$(( $(date +%s%3N) - _mqtt_start ))"
 
 RESULT=""
 if python3 -c "
-import json
+import json, time
+send_ts = ${_mqtt_start}
 for line in open('${_TMP}'):
     try:
         d=json.loads(line.strip())
-        if d.get('answer') or (d.get('id')=='${WAIT_ID}' and d.get('success')):
-            print('OK'); exit(0)
+        ts = d.get('timestamp', 0)
+        # Match: our specific wait_response with success, OR a fresh answer (after we sent)
+        if d.get('id')=='${WAIT_ID}' and d.get('success') and d.get('answer'):
+            exit(0)
+        if d.get('answer') and ts > send_ts:
+            exit(0)
     except: pass
 exit(1)
 " 2>/dev/null; then
