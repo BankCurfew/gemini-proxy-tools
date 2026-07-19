@@ -1,7 +1,7 @@
 #!/bin/bash
 # gemini-gen.sh — Generate image via Gemini (pinned to one tab)
 # Usage: ./gemini-gen.sh "prompt" [--tab ID] [--new] [--download prefix] [--keep]
-# Default: pins to active Gemini tab and reuses it for all requests.
+# Option B: polls chat + get_response (no new extension code needed)
 
 set -euo pipefail
 
@@ -27,8 +27,7 @@ done
 
 ID="gen_$(date +%s)"
 
-# Pre-flight: ping extension with list_tabs (status topic is unreliable)
-# Race-condition fix (#7): retry once if sub isn't established before pub fires
+# Pre-flight: ping extension with ID-filtered list_tabs
 _ping_attempt() {
   local attempt_id="$1" delay="$2"
   mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
@@ -64,13 +63,12 @@ if [ "$PING_OK" != "ok" ]; then
 fi
 echo "[ext:online]"
 
-# Resolve tab — pin to specific tab or find active one
+# Resolve tab
 if [ -z "$TAB_ID" ]; then
   TAB_ID=$(echo "$PING" | python3 -c "
 import sys, json
 d = json.loads(sys.stdin.read())
 tabs = d.get('tabs', [])
-# Prefer active tab, else first gemini tab
 active = [t for t in tabs if t.get('active')]
 print(active[0]['id'] if active else tabs[0]['id'] if tabs else '')
 " 2>/dev/null || echo "")
@@ -82,63 +80,64 @@ fi
 
 echo "[tab:$TAB_ID]"
 
-# For --new chat, set initial count to 0 since newChat resets the page
-# wait_response handles response detection internally — no initial count needed
-
 # T032: capture gen-start timestamp for stale-download detection
 GEN_START=$(date +%s)
 
-# Atomic chat_and_wait: captures DOM state → types → sends → waits for response change
-EXTRA_JSON=""
-[ "$NEW_CHAT" = "true" ] && EXTRA_JSON=",\"newChat\":true"
-WAIT_ID="wait_${ID}"
-_mqtt_start=$(date +%s%3N)
-echo "[~] Sending + waiting (90s)... [tab:$TAB_ID]"
-_TMP=$(mktemp)
-timeout 95 mosquitto_sub -t 'claude/browser/answer' -t 'claude/browser/response' -W 92 2>/dev/null < <(
-  sleep 1
-  mosquitto_pub -t 'claude/browser/command' \
-    -m "{\"action\":\"chat_and_wait\",\"text\":$(printf '%s' "$TEXT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"tabId\":$TAB_ID,\"timeout\":85000,\"id\":\"${WAIT_ID}\"${EXTRA_JSON},\"ts\":$(date +%s%3N)}"
-) > "$_TMP" 2>/dev/null || true
-mqtt_log "gen" "claude/browser/answer" "complete" "$(( $(date +%s%3N) - _mqtt_start ))"
-mqtt_log "wait" "claude/browser/answer" "wait" "$(( $(date +%s%3N) - _mqtt_start ))"
-
-RESULT=""
-if python3 -c "
-import json, time
-send_ts = ${_mqtt_start}
-for line in open('${_TMP}'):
+# Get initial response text (before sending)
+_get_response() {
+  local gid="$1"
+  local _gtmp=$(mktemp)
+  timeout 8 mosquitto_sub -t 'claude/browser/response' -C 3 -W 6 2>/dev/null < <(
+    sleep 1
+    mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"get_response\",\"tabId\":$TAB_ID,\"id\":\"${gid}\",\"ts\":$(date +%s%3N)}"
+  ) > "$_gtmp" 2>/dev/null || true
+  python3 -c "
+import json
+for line in open('${_gtmp}'):
     try:
         d=json.loads(line.strip())
-        ts = d.get('timestamp', 0)
-        # Match: our specific wait_response with success, OR a fresh answer (after we sent)
-        if d.get('id')=='${WAIT_ID}' and d.get('success') and d.get('answer'):
-            exit(0)
-        if d.get('answer') and ts > send_ts:
-            exit(0)
+        if d.get('id')=='${gid}' and d.get('answer'):
+            print(d['answer'][:200]); break
     except: pass
-exit(1)
-" 2>/dev/null; then
-  RESULT="OK"
-fi
-rm -f "$_TMP"
+" 2>/dev/null || true
+  rm -f "$_gtmp"
+}
+
+INIT_ANSWER=$(_get_response "init_${ID}")
+
+# Send the chat
+EXTRA=",\"tabId\":$TAB_ID"
+[ "$NEW_CHAT" = "true" ] && EXTRA="$EXTRA,\"newChat\":true"
+mosquitto_pub -t 'claude/browser/command' \
+  -m "{\"action\":\"chat\",\"text\":$(printf '%s' "$TEXT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"id\":\"${ID}\"${EXTRA},\"ts\":$(date +%s%3N)}"
+echo "[>] Sent"
+
+# Poll get_response until content changes (Option B detection)
+echo "[~] Waiting for response (90s)..."
+RESULT=""
+SECONDS=0
+while [ $SECONDS -lt 90 ]; do
+  sleep 3
+  CURRENT=$(_get_response "poll_${SECONDS}_$(date +%s%3N)")
+  if [ -n "$CURRENT" ] && [ "$CURRENT" != "$INIT_ANSWER" ]; then
+    RESULT="OK"
+    break
+  fi
+  printf "(%ds)\r" "$SECONDS" >&2
+done
 
 if [ -n "$RESULT" ]; then
   echo ""
-  echo "[OK] $RESULT"
+  echo "[OK] Response detected"
 
   if [ -n "$DL_PREFIX" ]; then
-    # T032 option A: Chrome auto-downloads generated images — find + rename
-    # Wait for auto-download to land (Chrome saves blob → Downloads)
     echo "[~] Waiting for auto-download..."
     WIN_PROFILE=$(cmd.exe /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r\n')
     DL_DIR="$(wslpath "$WIN_PROFILE")/Downloads"
     DL_OK=false
     for attempt in 1 2 3 4 5 6; do
       sleep 3
-      # Find newest image file (any common format) with mtime > GEN_START
       NEWEST=$(find "$DL_DIR" -maxdepth 1 -type f \( -name '*.jpg' -o -name '*.jpeg' -o -name '*.png' -o -name '*.webp' \) -newer "/proc/$$" 2>/dev/null | head -1)
-      # Fallback: check by mtime comparison
       if [ -z "$NEWEST" ]; then
         NEWEST=$(ls -t "$DL_DIR"/*.{jpg,jpeg,png,webp} 2>/dev/null | head -1)
         if [ -n "$NEWEST" ]; then
@@ -153,7 +152,6 @@ if [ -n "$RESULT" ]; then
           mv "$NEWEST" "$TARGET" 2>/dev/null && echo "[OK] Renamed to ${DL_PREFIX}.${EXT}" || TARGET="$NEWEST"
         fi
         echo "[OK] Image: $TARGET"
-        echo "[!] Files in /mnt/c/Users/\$USER/Downloads/"
         DL_OK=true
         break
       fi
@@ -165,28 +163,14 @@ if [ -n "$RESULT" ]; then
       exit 1
     fi
 
-    # Auto-delete the conversation to keep sidebar clean (unless --keep)
+    # Auto-delete conversation (unless --keep)
     if [ "$KEEP_CHAT" = "true" ]; then
       echo "[~] Keeping conversation (--keep)"
     else
       echo "[~] Cleaning up Gemini conversation..."
       sleep 1
-      DEL_CMD_ID="del_${ID}"
-      mqtt_pub -t 'claude/browser/response' -r -n 2>/dev/null
-      sleep 0.3
-      _mqtt_start=$(date +%s%3N)
-      DEL_RESULT=$(timeout 10 mosquitto_sub -t 'claude/browser/response' -C 1 -W 8 2>/dev/null < <(
-        sleep 0.5
-        mosquitto_pub -t 'claude/browser/command' \
-          -m "{\"action\":\"delete_chat\",\"tabId\":$TAB_ID,\"id\":\"${DEL_CMD_ID}\",\"ts\":$(date +%s%3N)}"
-      ) 2>/dev/null || echo "{}")
-      mqtt_log "delete_chat" "claude/browser/response" "$DEL_OK" "$(( $(date +%s%3N) - _mqtt_start ))"
-      DEL_OK=$(echo "$DEL_RESULT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('ok' if d.get('success') else d.get('error','unknown'))" 2>/dev/null || echo "failed")
-      if [ "$DEL_OK" = "ok" ]; then
-        echo "[OK] Conversation deleted"
-      else
-        echo "[~] Auto-delete skipped ($DEL_OK) — manual cleanup may be needed"
-      fi
+      mosquitto_pub -t 'claude/browser/command' \
+        -m "{\"action\":\"delete_chat\",\"tabId\":$TAB_ID,\"id\":\"del_${ID}\",\"ts\":$(date +%s%3N)}"
     fi
   fi
   exit 0
