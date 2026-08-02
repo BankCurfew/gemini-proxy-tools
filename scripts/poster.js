@@ -148,6 +148,7 @@ function heartbeat(taskId, pct, status) {
   try { fs.appendFileSync(feedPath, line); } catch {}
 }
 
+let _createdPages = [];
 async function connect() {
   const browser = await puppeteer.connect({
     browserURL: cfg.cdp_url,
@@ -163,6 +164,7 @@ async function connect() {
   if (!page) {
     console.log('No ChatGPT tab found. Opening brand chat...');
     page = await browser.newPage();
+    _createdPages.push(page);
     await page.goto(BRAND_CHAT_URL, { waitUntil: 'networkidle2' });
     await sleep(3000);
   } else if (!page.url().includes(activeChatId)) {
@@ -172,6 +174,13 @@ async function connect() {
   }
 
   return { browser, page };
+}
+
+async function cleanupCreatedPages() {
+  for (const p of _createdPages) {
+    try { if (!p.isClosed()) await p.close(); } catch {}
+  }
+  _createdPages = [];
 }
 
 // ── T6: Brand-chat rotation — open fresh chat when count >= max_chat_images ──
@@ -812,6 +821,7 @@ async function newChat(page, brandName) {
   // Open a NEW tab — bypass connect() which reuses existing ChatGPT tab
   const browser = page.browser();
   const newPage = await browser.newPage();
+  _createdPages.push(newPage);
 
   // Navigate to chatgpt.com home (fresh chat state)
   await newPage.goto('https://chatgpt.com/', { waitUntil: 'networkidle2', timeout: 30000 });
@@ -1000,9 +1010,14 @@ Examples:
         console.error(`Unknown command: ${cmd}. Run with 'help'.`);
     }
   } finally {
+    await cleanupCreatedPages();
     browser.disconnect();
   }
 }
+
+// Signal handler: close created tabs even on kill
+process.on('SIGINT', async () => { await cleanupCreatedPages(); process.exit(130); });
+process.on('SIGTERM', async () => { await cleanupCreatedPages(); process.exit(143); });
 
 main()
   .then(() => process.exit(process.exitCode || 0))
