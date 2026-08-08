@@ -1,10 +1,9 @@
 {
   "chatgpt_url": "https://chatgpt.com",
-  "brand_chat_id": "6a548998-bd58-83ec-8a8f-05470fdb0f93",
   "output_dir": "/mnt/c/Users/mbank/OneDrive/AIA/Posters",
   "downloads_dir": "/mnt/c/Users/mbank/Downloads",
   "cdp_url": "http://127.0.0.1:9222",
-  "cdp_protocol_timeout": 120000,
+  "cdp_protocol_timeout": 300000,
   "generation_timeout_ms": 180000,
   "poll_interval_ms": 5000,
   "stall_threshold_polls": 6,
@@ -12,21 +11,32 @@
   "heartbeat_oracle": "Designer-Oracle",
   "brands": {
     "iagencyaia": {
-      "chat_id": "6a5ad5d4-fcf4-83ec-a26b-dae3253fa8f8",
-      "created": "2026-07-18T01:24:41.796Z"
+      "chat_id": "6a768313-39bc-83ec-a55c-84bbc3afdb1c",
+      "created": "2026-08-08T01:15:03.398Z"
     },
     "wealthbanks": {
-      "chat_id": "6a5a7d07-37b4-83ec-8adc-26f2bf6751dd",
-      "created": "2026-07-17T19:05:47.037Z"
+      "chat_id": "6a5ca1b9-b0fc-83ec-83a2-8daacc4d2360",
+      "created": "2026-07-19T10:06:55.549Z"
+    }
+  },
+  "archived": {
+    "iagencyaia_old_6aug": {
+      "chat_id": "6a748ddd-9cd8-83ec-ae7c-fc11737dac51",
+      "created": "2026-08-06T13:36:33.607Z",
+      "note": "retired: case-variant conflict with iagencyaia key"
+    },
+    "_legacy_top_level_keys": {
+      "brand_chat_id": "6a768313-39bc-83ec-a55c-84bbc3afdb1c",
+      "fork_chat_id": "6a768313-39bc-83ec-a55c-84bbc3afdb1c",
+      "wealthbanks_chat_id": "6a524b60-cbcc-83ec-bb86-405a800155eb",
+      "iagencyaia_chat_id": "6a519da7-dda0-83ec-a8aa-e85d100986d5",
+      "iagencyaia_fork_id": "6a519da7-dda0-83ec-a8aa-e85d100986d5",
+      "note": "archived 2026-08-08: these divergent IDs caused wrong-brand routing. brands.<slug>.chat_id is now the sole source of truth."
     }
   },
   "stall_stable_polls": 3,
   "max_chat_images": 40,
   "qa_min_width": 768,
   "qa_min_height": 1024,
-  "qa_min_size_kb": 50,
-  "fork_chat_id": "6a548998-bd58-83ec-8a8f-05470fdb0f93",
-  "wealthbanks_chat_id": "6a524b60-cbcc-83ec-bb86-405a800155eb",
-  "iagencyaia_chat_id": "6a519da7-dda0-83ec-a8aa-e85d100986d5",
-  "iagencyaia_fork_id": "6a519da7-dda0-83ec-a8aa-e85d100986d5"
+  "qa_min_size_kb": 50
 }

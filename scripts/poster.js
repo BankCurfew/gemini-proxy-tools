@@ -32,21 +32,48 @@ try {
   cfg = { ...defaults, ...file };
 } catch {}
 
-// --brand flag: select active brand
+// --brand flag: select active brand (normalised to lowercase)
 const BRAND_FLAG = (() => {
   const idx = process.argv.indexOf('--brand');
-  return idx >= 0 && process.argv[idx + 1] ? process.argv[idx + 1] : null;
+  return idx >= 0 && process.argv[idx + 1] ? process.argv[idx + 1].toLowerCase() : null;
 })();
 
-function getActiveBrandChatId() {
-  if (BRAND_FLAG && cfg.brands && cfg.brands[BRAND_FLAG]) {
-    return cfg.brands[BRAND_FLAG].chat_id;
-  }
-  return cfg.brand_chat_id;
+function resolveBrand(slug) {
+  if (!slug) return null;
+  const key = slug.toLowerCase();
+  if (cfg.brands && cfg.brands[key]) return { slug: key, chat_id: cfg.brands[key].chat_id };
+  return null;
 }
 
-let BRAND_CHAT_URL = `${cfg.chatgpt_url}/c/${getActiveBrandChatId()}`;
-const FORK_CHAT_ID = cfg.fork_chat_id || null;
+function getActiveBrandChatId() {
+  if (!BRAND_FLAG) {
+    console.error('\n🚫 ERROR: --brand is required. No unbranded default exists.');
+    console.error('   Available brands: ' + Object.keys(cfg.brands || {}).join(', '));
+    console.error('   Usage: node poster.js <command> --brand <name>\n');
+    process.exitCode = 1;
+    process.exit(1);
+  }
+  const resolved = resolveBrand(BRAND_FLAG);
+  if (!resolved) {
+    console.error(`\n🚫 ERROR: Brand "${BRAND_FLAG}" not found in config.`);
+    console.error('   Available brands: ' + Object.keys(cfg.brands || {}).join(', '));
+    console.error(`   To create: node poster.js new-chat --brand ${BRAND_FLAG}\n`);
+    process.exitCode = 1;
+    process.exit(1);
+  }
+  return resolved.chat_id;
+}
+
+// Commands that don't need --brand
+const BRAND_EXEMPT_CMDS = new Set(['help', 'resolve', 'status', 'st', 'images', 'imgs']);
+const currentCmd = process.argv[2];
+let BRAND_CHAT_URL;
+if (BRAND_EXEMPT_CMDS.has(currentCmd) || !currentCmd) {
+  BRAND_CHAT_URL = cfg.chatgpt_url;
+} else {
+  BRAND_CHAT_URL = `${cfg.chatgpt_url}/c/${getActiveBrandChatId()}`;
+}
+const FORK_CHAT_ID = null; // legacy removed — brands.<slug>.chat_id is the sole source
 const FORCE_FLAG = process.argv.includes('--force');
 const DRY_RUN = process.argv.includes('--dry-run');
 const FEED_LOG = path.join(process.env.HOME || '/home/curfew', '.oracle/feed.log');
@@ -625,35 +652,18 @@ async function downloadAll(page, prefix) {
 async function generate(page, type, brief, taskId) {
   const dateStr = new Date().toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' });
 
-  // ── SAFEGUARD: Hard-block gen on live brand chat without fork ──
+  // ── SAFEGUARD: Brand gate — --brand is mandatory, gen must be in correct brand chat ──
   const currentUrl = page.url();
-  const activeChatId = getActiveBrandChatId();
-  const isLiveBrandChat = currentUrl.includes(cfg.brand_chat_id) && !BRAND_FLAG;
-  if (isLiveBrandChat && !FORK_CHAT_ID) {
-    console.error('\n🚫 BLOCKED: Target is the LIVE brand chat (' + cfg.brand_chat_id.slice(0, 8) + ')');
-    console.error('   Generating here pollutes the brand chat แบงค์ uses on mobile.');
-    console.error('   Fix: set "fork_chat_id" in poster.config.json to a forked chat,');
-    console.error('   or use --brand <name> to target a specific brand chat.');
-    console.error('   This is a hard block — --force does NOT override.\n');
+  const activeChatId = getActiveBrandChatId(); // exits if no --brand
+  console.log(`[brand] Resolved: --brand ${BRAND_FLAG} → chat_id ${activeChatId}`);
+
+  const brandCfg = cfg.brands[BRAND_FLAG];
+  if (!currentUrl.includes(brandCfg.chat_id)) {
+    console.error(`\n🚫 BLOCKED: Current chat is not the ${BRAND_FLAG} brand chat.`);
+    console.error(`   Expected: ${brandCfg.chat_id.slice(0, 8)}...`);
+    console.error(`   Current: ${currentUrl}\n`);
     process.exitCode = 4;
     return;
-  }
-
-  // ── SAFEGUARD: Brand gate — gen must be in correct brand chat ──
-  if (BRAND_FLAG) {
-    const brandCfg = cfg.brands && cfg.brands[BRAND_FLAG];
-    if (!brandCfg || !brandCfg.chat_id) {
-      console.error(`\n🚫 BLOCKED: Brand "${BRAND_FLAG}" not configured. Run: node poster.js new-chat --brand ${BRAND_FLAG}\n`);
-      process.exitCode = 4;
-      return;
-    }
-    if (!currentUrl.includes(brandCfg.chat_id)) {
-      console.error(`\n🚫 BLOCKED: Current chat is not the ${BRAND_FLAG} brand chat.`);
-      console.error(`   Expected: ${brandCfg.chat_id.slice(0, 8)}...`);
-      console.error(`   Current: ${currentUrl}\n`);
-      process.exitCode = 4;
-      return;
-    }
   }
 
   // ── SAFEGUARD: Warning for chats with >20 images ──
@@ -815,7 +825,8 @@ async function status(page) {
   console.log(`DALL-E images: ${info.imageCount}/${max} (${pct}%)${info.imageCount >= max ? ' ⚠️ ROTATE NEEDED' : ''}`);
 }
 
-async function newChat(page, brandName) {
+async function newChat(page, rawBrandName) {
+  const brandName = rawBrandName.toLowerCase();
   console.log(`[new-chat] Creating new ChatGPT chat for brand: ${brandName}`);
 
   // Open a NEW tab — bypass connect() which reuses existing ChatGPT tab
@@ -830,7 +841,6 @@ async function newChat(page, brandName) {
   // Verify we're on a clean home page, not redirected to an existing chat
   let url = newPage.url();
   const existingChatIds = Object.values(cfg.brands || {}).map(b => b.chat_id).filter(Boolean);
-  existingChatIds.push(cfg.brand_chat_id);
 
   if (existingChatIds.some(id => url.includes(id))) {
     console.log('[new-chat] Redirected to existing chat — forcing new via sidebar button...');
@@ -930,10 +940,11 @@ async function main() {
     console.log(`Poster CLI v3.2 — ChatGPT DALL-E poster generation via CDP
 
 Commands:
+  resolve --brand <name>   Show resolved chat_id for brand (acceptance test)
   status              Check ChatGPT tab status + image count
-  generate <type> <brief>  Generate poster (full pipeline: rotate→gen→verify→QA)
+  generate <type> <brief>  Generate poster (--brand required)
   new-chat --brand <name>  Create new ChatGPT chat for brand + save chat_id
-  prompt <text>       Send raw prompt to ChatGPT
+  prompt <text>       Send raw prompt to ChatGPT (--brand required)
   wait [taskId]       Wait for current generation (with heartbeat)
   download [prefix] [index]  Download image by index (default: latest)
   download-all [prefix]      Download ALL images in conversation
@@ -948,7 +959,7 @@ Flags:
   --force             Override >20 image warning (hard-block cannot be overridden)
 
 Safeguards:
-  🚫 HARD BLOCK: gen refuses if target = live brand chat without fork_chat_id in config
+  🚫 HARD BLOCK: --brand is REQUIRED for generate/prompt — no silent fallback
   ⚠️  WARNING: gen warns if chat has >20 images (requires --force)
   📝 LOGGING: every gen logs chat_id + prompt_hash to feed.log
 
@@ -962,6 +973,26 @@ Examples:
   node poster.js generate atw "China sanctions + Thai FDI +73%"
   node poster.js generate atw "brief" --dry-run
   node poster.js status`);
+    return;
+  }
+
+  // resolve command does not need a browser
+  if (cmd === 'resolve') {
+    if (!BRAND_FLAG) {
+      console.error('🚫 ERROR: --brand is required.');
+      console.error('   Available brands: ' + Object.keys(cfg.brands || {}).join(', '));
+      process.exitCode = 1;
+      return;
+    }
+    const resolved = resolveBrand(BRAND_FLAG);
+    if (!resolved) {
+      console.error(`🚫 Brand "${BRAND_FLAG}" not found.`);
+      console.error('   Available brands: ' + Object.keys(cfg.brands || {}).join(', '));
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`brand: ${resolved.slug}`);
+    console.log(`chat_id: ${resolved.chat_id}`);
     return;
   }
 
