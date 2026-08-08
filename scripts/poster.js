@@ -933,8 +933,20 @@ async function newChat(page, rawBrandName) {
   console.log(`[new-chat] New tab kept open at: ${newPage.url()}`);
 }
 
+function stripFlags(argv) {
+  const out = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--brand' || argv[i] === '--force' || argv[i] === '--dry-run') {
+      if (argv[i] === '--brand') i++; // skip the value too
+      continue;
+    }
+    out.push(argv[i]);
+  }
+  return out;
+}
+
 async function main() {
-  const [,, cmd, ...args] = process.argv;
+  const [,, cmd, ...args] = stripFlags(process.argv);
 
   if (!cmd || cmd === 'help') {
     console.log(`Poster CLI v3.2 — ChatGPT DALL-E poster generation via CDP
