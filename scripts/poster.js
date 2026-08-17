@@ -230,9 +230,19 @@ function heartbeat(taskId, pct, status) {
   // Invalid Date (zero rows, no error). Do NOT loosen the parser's replace(" ","T"); that would
   // make DD/MM silently parse as a WRONG date. Fix stays at the emitter. (Designer report, T621)
   const ts = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Bangkok', hour12: false });
+  // Emitter-side pin (Designer follow-up, ref 75f070c): fail LOUD if the stamp is not GR#9
+  // canonical. ICU has historically injected a narrow-no-break space (U+202F) into locale time
+  // formats (en-US @ ICU 72) — if sv-SE ever does the same, the dashboard aggregator would
+  // silently drop every HB with no error (the original bug). Assert the exact shape so a
+  // regression throws at emit/test time instead of failing silently in production.
+  const HB_TS_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$/;
+  if (!HB_TS_RE.test(ts)) {
+    throw new Error(`heartbeat timestamp not GR#9 canonical: ${JSON.stringify(ts)} (codepoints ${[...ts].map(c => c.codePointAt(0)).join(',')})`);
+  }
   const oracle = cfg.heartbeat_oracle;
   const hostname = require('os').hostname();
-  const line = `${ts} | ${oracle} | ${hostname} | Notification | ${oracle} | heartbeat » HB: ${taskId} ${pct}% ${status}\n`;
+  const line = `${ts} | ${oracle} | ${hostname} | Notification | ${oracle} | heartbeat » HB: ${taskId} ${pct}% ${status}
+`;
   const feedPath = path.join(process.env.HOME || '/home/curfew', '.oracle/feed.log');
   try { fs.appendFileSync(feedPath, line); } catch {}
 }
