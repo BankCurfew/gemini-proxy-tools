@@ -76,6 +76,37 @@ if (BRAND_EXEMPT_CMDS.has(currentCmd) || !currentCmd) {
 const FORK_CHAT_ID = null; // legacy removed — brands.<slug>.chat_id is the sole source
 const FORCE_FLAG = process.argv.includes('--force');
 const DRY_RUN = process.argv.includes('--dry-run');
+
+// ── T599: Cross-brand contamination guard ──
+// RULE (BoB, 2026-08-17): brand is selected by DESTINATION, not by chat.
+//   - Discord posting (news/content of wingman) = iAgencyAIA brand ALWAYS.
+//   - WealthBanks brand = wealthbanks.net covers ONLY.
+//   The two brands must NEVER cross. If a prompt destined for brand X contains a
+//   token that signals brand Y, the send is ABORTED (not warned).
+const BRAND_FORBID = {
+  iagencyaia: ['wealthbanks', 'prestige white', 'wealth-bank', 'wealthbanks.net', 'wb-'],
+  wealthbanks: ['iagencyaia', 'iagency', 'i-agency', '@iagencyaia', 'aia red', 'd31145', 'c8102e', 'discord', '@iagency'],
+};
+// Canonical brand name each slug must self-declare in a composed prompt.
+const BRAND_SELF_NAME = {
+  iagencyaia: 'iAgencyAIA',
+  wealthbanks: 'WealthBanks',
+};
+// Destination → the ONLY permitted brand. Enforced by callers choosing --brand.
+const DESTINATION_BRAND = {
+  discord: 'iagencyaia',      // wingman news/content posters
+  wealthbanks_net: 'wealthbanks', // wealthbanks.net covers
+};
+function assertBrandMatch(brand, prompt) {
+  const forbid = BRAND_FORBID[brand] || [];
+  const lower = (prompt || '').toLowerCase();
+  for (const tok of forbid) {
+    if (lower.includes(tok)) {
+      return { ok: false, reason: `cross-brand token "${tok}" in --brand ${brand} prompt (destination rule: Discord→iAgencyAIA, wealthbanks.net→WealthBanks; brands must not cross)` };
+    }
+  }
+  return { ok: true };
+}
 const FEED_LOG = path.join(process.env.HOME || '/home/curfew', '.oracle/feed.log');
 
 function logToFeed(chatId, promptHash, action) {
@@ -184,18 +215,18 @@ async function connect() {
   });
   const pages = await browser.pages();
   const activeChatId = getActiveBrandChatId();
+  // T599: ONLY accept the active brand chat. Never fall back to ANY other chatgpt.com/c/
+  // tab — that is the cross-brand contamination vector (a WB prompt could land in the iAgency chat).
   let page = pages.find(p => p.url().includes(activeChatId));
-  if (!page) page = pages.find(p => p.url().includes('chatgpt.com/c/'));
-  if (!page) page = pages.find(p => p.url().includes('chatgpt.com'));
 
   if (!page) {
-    console.log('No ChatGPT tab found. Opening brand chat...');
+    console.log('No brand chat tab found for --brand ' + BRAND_FLAG + '. Opening brand chat...');
     page = await browser.newPage();
     _createdPages.push(page);
     await page.goto(BRAND_CHAT_URL, { waitUntil: 'networkidle2' });
     await sleep(3000);
   } else if (!page.url().includes(activeChatId)) {
-    console.log('ChatGPT tab found but not brand chat. Navigating...');
+    console.log('ChatGPT tab found but not the ' + BRAND_FLAG + ' brand chat. Navigating...');
     await page.goto(BRAND_CHAT_URL, { waitUntil: 'networkidle2' });
     await sleep(3000);
   }
@@ -243,8 +274,14 @@ async function rollBrandChat(page) {
   const newChatUrl = await page.evaluate(() => window.location.href);
   console.log(`New chat opened: ${newChatUrl}`);
 
-  // Re-seed brand kit with Designer's proven BRAND_SEED
-  const primer = `${BRAND_SEED}\n\nYou are creating posters for iAgencyAIA brand. Always 9:16 vertical. Textured backgrounds, generous spacing, Asian people. Acknowledge with "Ready for poster requests."`;
+  // Re-seed brand kit — T599: must match the ACTIVE brand, never hardcode iAgencyAIA.
+  // Cross-brand contamination happened here: rotation re-seeded the WB chat with iAgencyAIA priming.
+  const brandSlug = BRAND_FLAG || 'iagencyaia';
+  const seedForBrand = {
+    iagencyaia: `${BRAND_SEED}\n\nYou are creating posters for iAgencyAIA brand. Always 9:16 vertical. Textured backgrounds, generous spacing, Asian people. Acknowledge with "Ready for iagencyaia posters."`,
+    wealthbanks: `Brand: WealthBanks — Prestige White theme. BG: ivory #FDFCF9. Palette: navy #1A2A45 + gold #C1A368 + bronze. Asian Thai models 30-50, warm natural lighting, NO text in image (CAR-dalle-nav). Asian family/couple planning finances at ivory-warm table. Acknowledge with "Ready for wealthbanks posters."`,
+  };
+  const primer = seedForBrand[brandSlug] || seedForBrand.iagencyaia;
   await sleep(1000);
 
   const typed = await page.evaluate((text) => {
@@ -729,6 +766,15 @@ async function generate(page, type, brief, taskId) {
 
     const beforeCount = (await listImages(page)).length;
     console.log(`Generating ${type} poster (attempt ${attempt + 1}, baseline: ${beforeCount} images)...`);
+    // T599 SAFEGUARD: cross-brand prompt assertion — ABORT if prompt carries another brand's tokens.
+    const brandCheck = assertBrandMatch(BRAND_FLAG, prompt);
+    if (!brandCheck.ok) {
+      console.error(`\n🚫 ABORT (T599): ${brandCheck.reason}`);
+      console.error(`   --brand ${BRAND_FLAG} prompt must NOT contain cross-brand content. Fix the prompt or use the correct --brand.`);
+      logToFeed(chatId, promptHash(prompt), `gen:${type}:BLOCKED-crossbrand`);
+      process.exitCode = 4;
+      return null;
+    }
     // SAFEGUARD: log chat_id + prompt_hash before every send
     const chatId = page.url().match(/\/c\/([a-f0-9-]+)/)?.[1] || 'unknown';
     logToFeed(chatId, promptHash(prompt), `gen:${type}`);
@@ -1018,9 +1064,19 @@ Examples:
       case 'generate': case 'gen':
         await generate(page, args[0] || 'raw', args.slice(1).join(' '), args[0]);
         break;
-      case 'prompt': case 'send':
-        await sendPrompt(page, args.join(' '));
+      case 'prompt': case 'send': {
+        // T599: cross-brand assertion on raw prompts too — ABORT, never send.
+        const raw = args.join(' ');
+        const bc = assertBrandMatch(BRAND_FLAG, raw);
+        if (!bc.ok) {
+          console.error(`\n🚫 ABORT (T599): ${bc.reason}`);
+          console.error(`   --brand ${BRAND_FLAG} prompt must NOT contain cross-brand content.`);
+          process.exitCode = 4;
+          break;
+        }
+        await sendPrompt(page, raw);
         break;
+      }
       case 'wait':
         await waitForImage(page, args[0] || '#13');
         break;
