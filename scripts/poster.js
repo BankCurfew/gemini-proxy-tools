@@ -224,25 +224,30 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ── T5: Heartbeat ──
 function heartbeat(taskId, pct, status) {
-  // GR#9 canonical stamp: YYYY-MM-DD HH:MM:SS, Bangkok local (GR#9 forbids date -u;
-  // dashboard parses feed.log timestamps as local). sv-SE yields the canonical shape directly
-  // with no replace() — en-GB rendered DD/MM/YYYY which the dashboard aggregator dropped as
-  // Invalid Date (zero rows, no error). Do NOT loosen the parser's replace(" ","T"); that would
-  // make DD/MM silently parse as a WRONG date. Fix stays at the emitter. (Designer report, T621)
-  const ts = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Bangkok', hour12: false });
-  // Emitter-side pin (Designer follow-up, ref 75f070c): fail LOUD if the stamp is not GR#9
-  // canonical. ICU has historically injected a narrow-no-break space (U+202F) into locale time
-  // formats (en-US @ ICU 72) — if sv-SE ever does the same, the dashboard aggregator would
-  // silently drop every HB with no error (the original bug). Assert the exact shape so a
-  // regression throws at emit/test time instead of failing silently in production.
-  const HB_TS_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$/;
-  if (!HB_TS_RE.test(ts)) {
-    throw new Error(`heartbeat timestamp not GR#9 canonical: ${JSON.stringify(ts)} (codepoints ${[...ts].map(c => c.codePointAt(0)).join(',')})`);
+  // GR#9 canonical stamp: YYYY-MM-DD HH:MM:SS, Bangkok LOCAL wall-clock.
+  // Bangkok is a FIXED +07:00 with NO DST, so we compute it WITHOUT any locale machinery:
+  // shift the epoch by +7h and read UTC fields. This removes the ICU dependency entirely —
+  // ICU 72 injected U+202F (narrow no-break space) into en-US time formats, so a locale-based
+  // stamp can regress silently and the dashboard would drop every HB (original bug). GR#9 forbids
+  // date -u only because the dashboard parses feed.log as LOCAL; this still yields Bangkok-local
+  // time, just constructed deterministically. Do NOT loosen the parser's replace(" ","T"); that
+  // would make DD/MM silently parse as a WRONG date. Fix stays at the emitter. (Designer T621 + addendum 3c95b8c)
+  const d = new Date(Date.now() + 7 * 3600 * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  const ts = `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} `
+           + `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+  // Test-only pin (Designer addendum 3c95b8c): a loud throw belongs in CI, never mid-generation.
+  // Production never throws — the stamp is now locale-independent and cannot regress, and HB code
+  // must not be able to abort the poster pipeline it observes. Parser untouched; dev's pin stands.
+  if (process.env.HB_PIN_TEST) {
+    const HB_TS_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$/;
+    if (!HB_TS_RE.test(ts)) {
+      throw new Error(`heartbeat timestamp not GR#9 canonical: ${JSON.stringify(ts)}`);
+    }
   }
   const oracle = cfg.heartbeat_oracle;
   const hostname = require('os').hostname();
-  const line = `${ts} | ${oracle} | ${hostname} | Notification | ${oracle} | heartbeat » HB: ${taskId} ${pct}% ${status}
-`;
+  const line = `${ts} | ${oracle} | ${hostname} | Notification | ${oracle} | heartbeat » HB: ${taskId} ${pct}% ${status}` + '\n';
   const feedPath = path.join(process.env.HOME || '/home/curfew', '.oracle/feed.log');
   try { fs.appendFileSync(feedPath, line); } catch {}
 }
