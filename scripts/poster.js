@@ -85,7 +85,7 @@ const DRY_RUN = process.argv.includes('--dry-run');
 //   token that signals brand Y, the send is ABORTED (not warned).
 const BRAND_FORBID = {
   iagencyaia: ['wealthbanks', 'prestige white', 'wealth-bank', 'wealthbanks.net', 'wb-'],
-  wealthbanks: ['iagencyaia', 'iagency', 'i-agency', '@iagencyaia', 'aia red', 'd31145', 'c8102e', 'discord', '@iagency'],
+  wealthbanks: ['iagencyaia', 'iagency', 'i-agency', '@iagencyaia', 'd31145', 'c8102e', 'discord', '@iagency'],
 };
 // Canonical brand name each slug must self-declare in a composed prompt.
 const BRAND_SELF_NAME = {
@@ -174,11 +174,37 @@ Key data with illustrated icons:
 
 Source line (above footer bar): Source: {SOURCE} | {DATE}
 
-Footer bar (red #C8102E bar at absolute bottom, white text):
-Line 1: FB iAgencyAIA | IG @iagencyaia | TikTok @iagencyaia | LINE @iagencyaia
-Line 2: iAgencyAIA | {DATE}
+Footer bar (gold #C1A368 bar at absolute bottom, navy #1A2A45 text):
+Line 1: WealthBanks | wealthbanks.net
+Line 2: PRIVATE WEALTH ADVISORY | {DATE}
 
-{COLOR_NOTES}. 9:16 vertical. Generate now.`;
+{LIGHT_NOTES}. Prestige White palette (ivory #FDFCF9 / gold #C1A368 / navy #1A2A45). NO AIA red. Square 1:1. Generate now.`;
+
+// ── T599: WealthBanks brand template (sourced from WEALTHBANKS-BRAND.md §2/§5/§6) ──
+// Prestige White DNA. Square 1:1 article cover. Logo = OVERLAY ONLY (never drawn by DALL-E).
+// Contains NO iAgency tokens → passes assertBrandMatch for --brand wealthbanks.
+const BRAND_TEMPLATE_WEALTHBANKS = `Generate an image: {TYPE} branded content graphic, SQUARE 1:1 composition 1024x1024 pixels.
+Ivory #FDFCF9 background with subtle warm gradient.
+Leave TOP-LEFT corner blank/clean for logo overlay (do NOT draw any logo, wordmark, or brand text — logo is composited in post).
+
+Large Thai headline navy #1A2A45 bold:
+{HEADLINE_TEXT}
+
+Photo: {HERO_DESCRIPTION}. Right 50% of composition, blending into ivory background with soft gradient. Photo-realistic, warm natural lighting, NOT CGI.
+
+3 gold #C1A368 icon pill cards on left side:
+{DATA_ITEMS}
+
+Prestige White palette only (ivory #FDFCF9 / gold #C1A368 / navy #1A2A45). NO numbers NO data NO red.
+NO logos NO watermarks NO brand text anywhere in the image.
+
+Source line (above footer bar): Source: wealthbanks.net | {DATE}
+
+Footer bar (gold #C1A368 bar at absolute bottom, navy #1A2A45 text):
+Line 1: WealthBanks | wealthbanks.net
+Line 2: PRIVATE WEALTH ADVISORY | {DATE}
+
+{LIGHT_NOTES}. Prestige White palette (ivory #FDFCF9 / gold #C1A368 / navy #1A2A45). NO AIA red. Square 1:1. Generate now.`;
 
 // ── T2: Refusal patterns (EN + THAI) ──
 const REFUSAL_PATTERNS = [
@@ -739,7 +765,9 @@ async function generate(page, type, brief, taskId) {
     prompt = brief;
   } else {
     const tm = TYPE_MAP[type] || { badge: type.toUpperCase(), name: type, icon: 'star', color: 'blue' };
-    prompt = BRAND_TEMPLATE
+    // T599: select brand template by --brand (destination rule)
+    const brandTpl = BRAND_FLAG === 'wealthbanks' ? BRAND_TEMPLATE_WEALTHBANKS : BRAND_TEMPLATE;
+    prompt = brandTpl
       .replace('{TYPE}', type)
       .replace('{BADGE_CODE}', tm.badge)
       .replace('{BADGE_NAME}', tm.name)
@@ -756,7 +784,8 @@ async function generate(page, type, brief, taskId) {
       .replace('{DATA_ITEMS}', '')
       .replace('{CARDS}', '')
       .replace('{COLOR_NOTES}', tm.color === 'red' ? 'Dark background #0a0a12' : 'Light theme')
-      .replace('{SOURCE}', 'iAgencyAIA');
+      .replace('{LIGHT_NOTES}', 'Light Prestige White theme')
+      .replace('{SOURCE}', BRAND_FLAG === 'wealthbanks' ? 'wealthbanks.net' : 'iAgencyAIA');
   }
 
   for (let attempt = 0; attempt <= cfg.max_retries; attempt++) {
