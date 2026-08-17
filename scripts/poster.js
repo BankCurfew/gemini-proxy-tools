@@ -224,7 +224,12 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ── T5: Heartbeat ──
 function heartbeat(taskId, pct, status) {
-  const ts = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok', hour12: false }).replace(',', '');
+  // GR#9 canonical stamp: YYYY-MM-DD HH:MM:SS, Bangkok local (GR#9 forbids date -u;
+  // dashboard parses feed.log timestamps as local). sv-SE yields the canonical shape directly
+  // with no replace() — en-GB rendered DD/MM/YYYY which the dashboard aggregator dropped as
+  // Invalid Date (zero rows, no error). Do NOT loosen the parser's replace(" ","T"); that would
+  // make DD/MM silently parse as a WRONG date. Fix stays at the emitter. (Designer report, T621)
+  const ts = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Bangkok', hour12: false });
   const oracle = cfg.heartbeat_oracle;
   const hostname = require('os').hostname();
   const line = `${ts} | ${oracle} | ${hostname} | Notification | ${oracle} | heartbeat » HB: ${taskId} ${pct}% ${status}\n`;
