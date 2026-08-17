@@ -232,13 +232,35 @@ function heartbeat(taskId, pct, status) {
   // date -u only because the dashboard parses feed.log as LOCAL; this still yields Bangkok-local
   // time, just constructed deterministically. Do NOT loosen the parser's replace(" ","T"); that
   // would make DD/MM silently parse as a WRONG date. Fix stays at the emitter. (Designer T621 + addendum 3c95b8c)
-  const d = new Date(Date.now() + 7 * 3600 * 1000);
-  const p = (n) => String(n).padStart(2, '0');
-  const ts = `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} `
-           + `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
-  // Test-only pin (Designer addendum 3c95b8c): a loud throw belongs in CI, never mid-generation.
-  // Production never throws — the stamp is now locale-independent and cannot regress, and HB code
-  // must not be able to abort the poster pipeline it observes. Parser untouched; dev's pin stands.
+  //
+  // Doctrine (BoB): fail-closed applies to VERIFIER/CLAIM, not PAYLOAD. HB is observability of the
+  // poster job — it must FAIL-VISIBLE: the stamp (payload) always survives, and any break fires a
+  // LOUD alert. We never let HB abort the pipeline it observes. So: build the stamp in a try/catch;
+  // on failure, fall back to the same locale-independent canonical shape and emit a loud alert line.
+  // The only throw is under HB_PIN_TEST (CI) — that is the verifier, where loud failure belongs.
+  let ts;
+  try {
+    const d = new Date(Date.now() + 7 * 3600 * 1000);
+    const p = (n) => String(n).padStart(2, '0');
+    ts = `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} `
+       + `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+  } catch (e) {
+    // Fallback canonical stamp — payload MUST survive. Built from toISOString() of the +7h-
+    // shifted Date (single method, independent of the UTC-field getters used above) so a break
+    // in one Date accessor cannot take down the fallback too. If even this fails, fall back to a
+    // fixed placeholder so the HB write never throws.
+    let fb;
+    try {
+      fb = new Date(Date.now() + 7 * 3600 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+    } catch {
+      fb = '1970-01-01 00:00:00';
+    }
+    ts = fb;
+    const alert = `${ts} | BotDev-Oracle | ${require('os').hostname()} | Alert | BotDev-Oracle | heartbeat » ALERT: HB timestamp construction failed, emitted fallback canonical stamp (${JSON.stringify(String(e && e.message))}) — investigate poster.js heartbeat()\n`;
+    try { fs.appendFileSync(path.join(process.env.HOME || '/home/curfew', '.oracle/feed.log'), alert); } catch {}
+  }
+  // Test-only pin (Designer addendum 3c95b8c + BoB doctrine): a loud throw belongs in CI (the
+  // verifier), never mid-generation (the payload). Production never throws.
   if (process.env.HB_PIN_TEST) {
     const HB_TS_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$/;
     if (!HB_TS_RE.test(ts)) {
