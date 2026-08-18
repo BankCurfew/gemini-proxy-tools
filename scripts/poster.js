@@ -9,7 +9,7 @@
 const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const path = require('path');
-const { isPosterImage, POSTER_IMG_SELECTOR } = require('./poster-image-matcher');
+const { POSTER_IMG_SELECTOR } = require('./poster-image-matcher');
 
 // ── T4: Config from file ──
 const CONFIG_PATH = path.join(__dirname, 'poster.config.json');
@@ -632,17 +632,23 @@ async function waitForImage(page, taskId, timeoutMs, opts) {
 }
 
 async function listImages(page) {
-  return page.evaluate(() => {
-    return Array.from(document.querySelectorAll('img')).map((img, i) => ({
-      globalIdx: i,
-      w: img.naturalWidth || img.width,
-      h: img.naturalHeight || img.height,
-      alt: (img.alt || '').substring(0, 50),
-      src: (img.src || '').substring(0, 80),
-      hasAlt: !!(img.alt && img.alt.startsWith('Generated'))
-    }));
-  // Filter with the shared matcher so estuary CDN images are detected too.
-  }).then((imgs) => imgs.filter(isPosterImage));
+  // Filter INSIDE the browser context (page.evaluate) using POSTER_IMG_SELECTOR so
+  // estuary CDN images are detected here too. globalIdx = index in the FULL img
+  // NodeList, which downloadImage() uses to locate the element (document.querySelectorAll('img')[globalIdx]).
+  return page.evaluate((sel) => {
+    const all = Array.from(document.querySelectorAll('img'));
+    return all
+      .map((img, i) => ({ img, i }))
+      .filter(({ img }) => img.matches(sel))
+      .map(({ img, i }) => ({
+        globalIdx: i,
+        w: img.naturalWidth || img.width,
+        h: img.naturalHeight || img.height,
+        alt: (img.alt || '').substring(0, 50),
+        src: (img.src || '').substring(0, 80),
+        hasAlt: !!(img.alt && img.alt.startsWith('Generated'))
+      }));
+  }, POSTER_IMG_SELECTOR);
 }
 
 async function downloadImage(page, prefix, indexArg) {
