@@ -9,6 +9,7 @@
 const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const path = require('path');
+const { isPosterImage, POSTER_IMG_SELECTOR } = require('./poster-image-matcher');
 
 // ── T4: Config from file ──
 const CONFIG_PATH = path.join(__dirname, 'poster.config.json');
@@ -311,9 +312,9 @@ async function cleanupCreatedPages() {
 
 // ── T6: Brand-chat rotation — open fresh chat when count >= max_chat_images ──
 async function getImageCount(page) {
-  return page.evaluate(() =>
-    document.querySelectorAll('img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"]').length
-  );
+  // POSTER_IMG_SELECTOR covers Generated-alt, blob:, oaidalleapi, AND estuary
+  // (new OpenAI CDN: chatgpt.com/backend-api/estuary/content?id=file_*).
+  return page.evaluate((sel) => document.querySelectorAll(sel).length, POSTER_IMG_SELECTOR);
 }
 
 async function rollBrandChat(page) {
@@ -639,8 +640,9 @@ async function listImages(page) {
       alt: (img.alt || '').substring(0, 50),
       src: (img.src || '').substring(0, 80),
       hasAlt: !!(img.alt && img.alt.startsWith('Generated'))
-    })).filter(img => img.w > 300 && img.h > 300 && img.hasAlt);
-  });
+    }));
+  // Filter with the shared matcher so estuary CDN images are detected too.
+  }).then((imgs) => imgs.filter(isPosterImage));
 }
 
 async function downloadImage(page, prefix, indexArg) {
