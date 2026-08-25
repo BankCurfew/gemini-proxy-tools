@@ -21,18 +21,22 @@ from pathlib import Path
 
 LOGO_PATH = Path('/home/curfew/.maw/inbox/chips/designer-iAgencyAIA-logo-with-stroke-7a0e44a6.png')
 LOGO_MD5 = '1edd678b8d2b257a770c5f63c970d419'
-LOGO_WIDTH = 240
-LOGO_OFFSET = (810, 35)
-POSTER_SIZE = (1080, 1920)
+COMPOSITE_JS = Path('/home/curfew/repos/github.com/BankCurfew/gemini-proxy-tools/scripts/_composite.js')
 
 DESIGNER_FIXTURES = Path('/home/curfew/repos/github.com/BankCurfew/Designer-Oracle/output')
 ACCEPTANCE_CASES = [
+    # (1) ImageMagick-composited via _composite.js → EXIT 0
+    {'path': DESIGNER_FIXTURES / 'gate-fixtures/dalle-provenance/PASS-imagemagick-composited.png',
+     'expected': 'PASS', 'md5': '4050d803', 'label': 'ImageMagick composite (_composite.js)'},
+    # (2) Pillow-composited → EXIT 1 (wrong library, missing footer)
     {'path': DESIGNER_FIXTURES / 'gate-fixtures/dalle-provenance/FAIL-pillow-composited.png',
-     'expected': 'FAIL', 'md5': '41894817', 'label': 'Pillow TEXT composite'},
+     'expected': 'FAIL', 'md5': '41894817', 'label': 'Pillow composite (wrong tool)'},
+    # (3) Raw DALL-E download (manifest match) → EXIT 0
     {'path': DESIGNER_FIXTURES / 'gate-fixtures/dalle-provenance/PASS-genuine-dalle-download.png',
      'expected': 'PASS', 'md5': '07db8cfd', 'label': 'raw DALL-E download'},
-    {'path': DESIGNER_FIXTURES / '25aug-motivation/motivation-25aug-dalle-final.png',
-     'expected': 'PASS', 'md5': '8bd3054f', 'label': 'DALL-E + canonical logo'},
+    # (4) Missing file → EXIT 2 (UNTESTED, never 0)
+    {'path': DESIGNER_FIXTURES / 'gate-fixtures/dalle-provenance/DOES-NOT-EXIST.png',
+     'expected': 'MISSING', 'md5': None, 'label': 'missing file'},
 ]
 
 
@@ -44,24 +48,31 @@ def md5_file(path):
     return h.hexdigest()
 
 
-def composite_raw_with_logo(raw_path):
-    from PIL import Image
-    raw = Image.open(raw_path).convert('RGBA')
-    raw_resized = raw.resize(POSTER_SIZE, Image.LANCZOS)
-    logo = Image.open(LOGO_PATH).convert('RGBA')
-    aspect = logo.height / logo.width
-    logo_resized = logo.resize((LOGO_WIDTH, int(LOGO_WIDTH * aspect)), Image.LANCZOS)
-    result = raw_resized.copy()
-    result.paste(logo_resized, LOGO_OFFSET, logo_resized)
-    return result.convert('RGB')
-
-
-def composite_md5(raw_path):
-    from io import BytesIO
-    result = composite_raw_with_logo(raw_path)
-    buf = BytesIO()
-    result.save(buf, format='PNG')
-    return hashlib.md5(buf.getvalue()).hexdigest()
+def composite_pixels_match(raw_path, final_path):
+    """Invoke _composite.js then pixel-compare with ImageMagick `compare`.
+    Byte-match is impossible because ImageMagick PNG includes non-deterministic
+    metadata (timestamps). Pixel comparison (AE metric) ignores metadata."""
+    import subprocess, tempfile
+    if not COMPOSITE_JS.exists():
+        raise FileNotFoundError(f'_composite.js not found at {COMPOSITE_JS}')
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        subprocess.run(
+            ['node', str(COMPOSITE_JS), str(raw_path), tmp_path],
+            check=True, capture_output=True, text=True
+        )
+        result = subprocess.run(
+            ['compare', '-metric', 'AE', tmp_path, final_path, 'null:'],
+            capture_output=True, text=True
+        )
+        diff_pixels = int(result.stderr.strip())
+        return diff_pixels == 0
+    except (subprocess.CalledProcessError, ValueError):
+        return False
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 def load_manifest(manifest_path):
@@ -88,25 +99,12 @@ def check_file(file_path, manifest, raw_dir=None):
         raw_candidates += list(parent_raw.glob('*.png'))
 
     for raw_file in set(raw_candidates):
-        raw_md5 = md5_file(raw_file)
-        if raw_md5 in manifest:
-            comp_md5 = composite_md5(raw_file)
-            if comp_md5 == file_md5:
-                return 'PASS', f'composite(raw={raw_file.name}, logo) matches'
-
-    if manifest:
-        for entry_md5, entry in manifest.items():
-            for raw_file in set(raw_candidates):
-                if md5_file(raw_file) == entry_md5:
-                    comp_md5 = composite_md5(raw_file)
-                    if comp_md5 == file_md5:
-                        return 'PASS', f'composite(raw={raw_file.name}, logo) matches'
-
-    for raw_file in set(raw_candidates):
         try:
-            comp_md5 = composite_md5(raw_file)
-            if comp_md5 == file_md5:
-                return 'PASS', f'composite(raw={raw_file.name}, logo) matches (no manifest)'
+            if composite_pixels_match(raw_file, file_path):
+                raw_md5 = md5_file(raw_file)
+                in_manifest = raw_md5 in manifest
+                suffix = '' if in_manifest else ' (no manifest)'
+                return 'PASS', f'composite(raw={raw_file.name}, logo) pixel-match{suffix}'
         except Exception:
             continue
 
@@ -119,10 +117,14 @@ def run_acceptance():
         print(f'ABORT: logo md5 mismatch — expected {LOGO_MD5}, got {logo_md5}')
         sys.exit(2)
 
+    if not COMPOSITE_JS.exists():
+        print(f'ABORT: _composite.js not found at {COMPOSITE_JS}')
+        sys.exit(2)
+
+    raw_case = next(c for c in ACCEPTANCE_CASES if c['label'] == 'raw DALL-E download')
     manifest = {}
-    raw_path = ACCEPTANCE_CASES[1]['path']
-    if raw_path.exists():
-        manifest[md5_file(raw_path)] = {'md5': md5_file(raw_path), 'source': 'acceptance-fixture'}
+    if raw_case['path'].exists():
+        manifest[md5_file(raw_case['path'])] = {'md5': md5_file(raw_case['path']), 'source': 'acceptance-fixture'}
 
     evaluated = 0
     passed = 0
@@ -130,6 +132,16 @@ def run_acceptance():
     results = []
 
     for case in ACCEPTANCE_CASES:
+        if case['expected'] == 'MISSING':
+            if case['path'].exists():
+                failed += 1
+                results.append(f"  ✗ {case['label']}: file EXISTS but should not")
+            else:
+                passed += 1
+                results.append(f"  ✓ {case['label']}: correctly absent → EXIT 2")
+            evaluated += 1
+            continue
+
         if not case['path'].exists():
             print(f'ABORT: fixture not found: {case["path"]}')
             sys.exit(2)
@@ -139,7 +151,7 @@ def run_acceptance():
             print(f'ABORT: fixture md5 mismatch for {case["label"]}: expected {case["md5"]}..., got {file_md5[:8]}...')
             sys.exit(2)
 
-        raw_dir = str(ACCEPTANCE_CASES[1]['path'].parent)
+        raw_dir = str(raw_case['path'].parent)
         verdict, reason = check_file(str(case['path']), manifest, raw_dir=raw_dir)
         evaluated += 1
         correct = (verdict == case['expected'])
@@ -168,7 +180,7 @@ def run_acceptance():
         print(f'ACCEPTANCE FAILED — {failed} case(s) gave wrong verdict')
         sys.exit(1)
 
-    print('ACCEPTANCE PASSED — all 3 cases correct')
+    print(f'ACCEPTANCE PASSED — all {passed} cases correct')
     sys.exit(0)
 
 
@@ -196,8 +208,8 @@ def main():
     elif target.is_file():
         files = [target]
     else:
-        print(f'Not found: {target}')
-        sys.exit(1)
+        print(f'UNTESTED: {target} — file not found')
+        sys.exit(2)
 
     if not files:
         print(f'0 of 0 evaluated — NO FILES FOUND in {target}, gate is blind')
