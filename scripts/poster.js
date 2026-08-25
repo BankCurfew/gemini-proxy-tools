@@ -289,15 +289,27 @@ async function connect() {
   let page = pages.find(p => p.url().includes(activeChatId));
 
   if (!page) {
-    console.log('No brand chat tab found for --brand ' + BRAND_FLAG + '. Opening brand chat...');
-    page = await browser.newPage();
-    _createdPages.push(page);
-    await page.goto(BRAND_CHAT_URL, { waitUntil: 'networkidle2' });
+    // T833: the tab may be at chatgpt.com/ home — try navigating an existing ChatGPT tab
+    const chatgptPage = pages.find(p => p.url().includes('chatgpt.com'));
+    if (!chatgptPage) {
+      throw new Error(
+        `🚫 CONNECT FAILED: No ChatGPT tab open in browser.\n` +
+        `   Open https://chatgpt.com/c/${activeChatId} in แบงค์'s Chrome, then retry.`
+      );
+    }
+    console.log(`[connect] ChatGPT tab at ${chatgptPage.url()} — navigating to brand chat...`);
+    await chatgptPage.goto(BRAND_CHAT_URL, { waitUntil: 'networkidle2' });
     await sleep(3000);
-  } else if (!page.url().includes(activeChatId)) {
-    console.log('ChatGPT tab found but not the ' + BRAND_FLAG + ' brand chat. Navigating...');
-    await page.goto(BRAND_CHAT_URL, { waitUntil: 'networkidle2' });
-    await sleep(3000);
+    // Verify navigation reached the target chat — ChatGPT may redirect to home or new chat
+    if (!chatgptPage.url().includes(activeChatId)) {
+      throw new Error(
+        `🚫 CONNECT FAILED: Navigated to brand chat but landed at ${chatgptPage.url()}\n` +
+        `   Expected URL to contain: ${activeChatId.slice(0, 8)}...\n` +
+        `   The chat may have been deleted or the session expired.\n` +
+        `   Fix: open https://chatgpt.com/c/${activeChatId} manually, or run: node poster.js new-chat --brand ${BRAND_FLAG}`
+      );
+    }
+    page = chatgptPage;
   }
 
   return { browser, page };
