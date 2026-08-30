@@ -7,6 +7,7 @@
 // Task: gemini-proxy-tools#13
 
 const puppeteer = require('puppeteer-core');
+const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { POSTER_IMG_SELECTOR } = require('./poster-image-matcher');
@@ -1143,6 +1144,21 @@ Examples:
     console.log(`brand: ${resolved.slug}`);
     console.log(`chat_id: ${resolved.chat_id}`);
     return;
+  }
+
+  // T1097 step-0: verify ChatGPT session is alive before connecting
+  const ensureScript = path.join(process.env.HOME || '/home/curfew',
+    'repos/github.com/BankCurfew/Admin-Oracle/scripts/chatgpt-session-ensure.sh');
+  if (fs.existsSync(ensureScript)) {
+    try {
+      execSync(`bash "${ensureScript}"`, { stdio: 'inherit', timeout: 30000 });
+    } catch (e) {
+      const code = e.status || 1;
+      console.error(`🚫 T1097 SESSION GATE FAILED (exit ${code}): ChatGPT session not healthy.`);
+      console.error('   Fix: re-login to ChatGPT in แบงค์\'s Chrome, then retry.');
+      process.exitCode = code;
+      return;
+    }
   }
 
   const { browser, page } = await connect();
