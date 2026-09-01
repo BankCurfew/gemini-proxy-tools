@@ -399,26 +399,34 @@ async function rollBrandChat(page) {
 }
 
 // ── T9: Verify image belongs to THIS prompt's assistant message ──
+// T1203: ChatGPT removed data-message-author-role from DOM (nobi found on Dreams 2026-09-01).
+// Primary path: scoped assistant-message check. Fallback: pure count-based (estuary direct-poll).
 async function verifyImageGeneration(page, promptText, beforeCount) {
-  return page.evaluate((prompt, before) => {
-    const assistantMsgs = document.querySelectorAll('[data-message-author-role="assistant"]');
-    if (!assistantMsgs.length) return { valid: false, reason: 'no assistant messages' };
+  return page.evaluate((prompt, before, imgSel) => {
+    // T1203 fallback selectors — try data-message-author-role first, then alternatives
+    const assistantMsgs =
+      document.querySelectorAll('[data-message-author-role="assistant"]');
+    const scopedMsgs = assistantMsgs.length
+      ? assistantMsgs
+      : document.querySelectorAll('[data-testid^="conversation-turn-"],[data-message-id]');
 
-    const lastMsg = assistantMsgs[assistantMsgs.length - 1];
-    const msgImages = lastMsg.querySelectorAll('img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"]');
-
-    if (msgImages.length === 0) {
-      return { valid: false, reason: 'no images in last assistant message' };
-    }
-
-    // Check that the image is a new one (not pre-existing)
-    const allImgs = document.querySelectorAll('img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"]');
+    const allImgs = document.querySelectorAll(imgSel);
     if (allImgs.length <= before) {
       return { valid: false, reason: `total count ${allImgs.length} not greater than baseline ${before}` };
     }
 
-    return { valid: true, imgCount: msgImages.length, totalCount: allImgs.length };
-  }, promptText, beforeCount);
+    // If we have scoped messages, verify the last one contains an image
+    if (scopedMsgs.length) {
+      const lastMsg = scopedMsgs[scopedMsgs.length - 1];
+      const msgImages = lastMsg.querySelectorAll(imgSel);
+      if (msgImages.length > 0) {
+        return { valid: true, imgCount: msgImages.length, totalCount: allImgs.length, method: 'scoped' };
+      }
+    }
+
+    // T1203 fallback: count increased → image was generated (estuary direct-poll)
+    return { valid: true, imgCount: allImgs.length - before, totalCount: allImgs.length, method: 'count-fallback' };
+  }, promptText, beforeCount, POSTER_IMG_SELECTOR);
 }
 
 // ── Auto-resize to 1080x1920 (IG Story) — pad on brand canvas, never distort ──
@@ -533,10 +541,27 @@ async function sendPrompt(page, prompt) {
 }
 
 // ── T2: Read last assistant message ──
+// T1203: fallback selectors when data-message-author-role is absent from DOM
 async function getLastAssistantMsg(page) {
   return page.evaluate(() => {
-    const msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
-    if (!msgs.length) return '';
+    // Primary: data-message-author-role (may be removed by ChatGPT)
+    let msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
+    if (!msgs.length) {
+      // T1203 fallback chain:
+      // 1. data-testid conversation turns (odd = assistant in ChatGPT's DOM)
+      // 2. data-message-id containers (role-agnostic)
+      msgs = document.querySelectorAll('[data-testid^="conversation-turn-"]');
+      if (msgs.length) {
+        const last = msgs[msgs.length - 1];
+        return (last.textContent || '').trim().slice(0, 500);
+      }
+      msgs = document.querySelectorAll('[data-message-id]');
+      if (msgs.length) {
+        const last = msgs[msgs.length - 1];
+        return (last.textContent || '').trim().slice(0, 500);
+      }
+      return '';
+    }
     const last = msgs[msgs.length - 1];
     return (last.textContent || '').trim().slice(0, 500);
   });
@@ -595,11 +620,17 @@ async function waitForImage(page, taskId, timeoutMs, opts) {
       heartbeat(taskId || '#13', pct, `waiting ${elapsed}s`);
     }
 
-    const status = await page.evaluate(() => {
-      const imgs = document.querySelectorAll('img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"]');
-      const thinking = document.querySelector('[class*="thinking"], [class*="streaming"], [data-message-author-role="assistant"] [class*="result-streaming"]');
+    const status = await page.evaluate((imgSel) => {
+      const imgs = document.querySelectorAll(imgSel);
+      // T1203: broaden streaming detection — don't scope to data-message-author-role
+      // which ChatGPT may remove. Check global streaming indicators + progress bars.
+      const thinking = document.querySelector(
+        '[class*="thinking"], [class*="streaming"], [class*="result-streaming"],' +
+        '[class*="progress"], [data-testid*="streaming"],' +
+        '[data-message-author-role="assistant"] [class*="result-streaming"]'
+      );
       return { imgCount: imgs.length, isThinking: !!thinking };
-    });
+    }, POSTER_IMG_SELECTOR);
 
     if (status.imgCount > lastCount) {
       console.log(`\nImage generated! (${elapsed}s)`);
@@ -950,12 +981,12 @@ async function generate(page, type, brief, taskId) {
 }
 
 async function status(page) {
-  const info = await page.evaluate(() => {
-    const imgs = document.querySelectorAll('img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"]');
+  const info = await page.evaluate((sel) => {
+    const imgs = document.querySelectorAll(sel);
     const title = document.title;
     const url = window.location.href;
     return { title, url, imageCount: imgs.length };
-  });
+  }, POSTER_IMG_SELECTOR);
   const max = cfg.max_chat_images || 40;
   const pct = Math.round((info.imageCount / max) * 100);
   console.log(`Tab: ${info.title}`);
