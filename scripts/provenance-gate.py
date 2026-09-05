@@ -16,12 +16,14 @@ Usage:
   python3 provenance-gate.py --acceptance   # run 3-way acceptance test
 """
 
-import sys, os, hashlib, json, argparse
+import sys, os, hashlib, json, argparse, datetime, subprocess, tempfile
 from pathlib import Path
 
 LOGO_PATH = Path('/home/curfew/.maw/inbox/chips/designer-iAgencyAIA-logo-with-stroke-7a0e44a6.png')
 LOGO_MD5 = '1edd678b8d2b257a770c5f63c970d419'
 COMPOSITE_JS = Path('/home/curfew/repos/github.com/BankCurfew/gemini-proxy-tools/scripts/_composite.js')
+DEFAULT_FOOTER = Path('/home/curfew/repos/github.com/BankCurfew/Designer-Oracle/brand/footer-black.png')
+BUILD_FOOTER = Path('/home/curfew/repos/github.com/BankCurfew/Designer-Oracle/scripts/build-footer-dated.py')
 
 DESIGNER_FIXTURES = Path('/home/curfew/repos/github.com/BankCurfew/Designer-Oracle/output')
 ACCEPTANCE_CASES = [
@@ -48,20 +50,37 @@ def md5_file(path):
     return h.hexdigest()
 
 
-def composite_pixels_match(raw_path, final_path):
+def build_dated_footer(iso_date):
+    """Build a footer for the given ISO date, return path to temp file."""
+    if not BUILD_FOOTER.exists():
+        return None
+    tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False, prefix='footer-')
+    tmp.close()
+    try:
+        subprocess.run(
+            ['python3', str(BUILD_FOOTER), iso_date, tmp.name],
+            check=True, capture_output=True, text=True,
+            cwd=str(BUILD_FOOTER.parent.parent),
+        )
+        return tmp.name
+    except subprocess.CalledProcessError:
+        os.unlink(tmp.name)
+        return None
+
+
+def composite_pixels_match(raw_path, final_path, footer_path=None):
     """Invoke _composite.js then pixel-compare with ImageMagick `compare`.
     Byte-match is impossible because ImageMagick PNG includes non-deterministic
     metadata (timestamps). Pixel comparison (AE metric) ignores metadata."""
-    import subprocess, tempfile
     if not COMPOSITE_JS.exists():
         raise FileNotFoundError(f'_composite.js not found at {COMPOSITE_JS}')
     with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
         tmp_path = tmp.name
     try:
-        subprocess.run(
-            ['node', str(COMPOSITE_JS), str(raw_path), tmp_path],
-            check=True, capture_output=True, text=True
-        )
+        cmd = ['node', str(COMPOSITE_JS), str(raw_path), tmp_path]
+        if footer_path:
+            cmd.append(str(footer_path))
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
         result = subprocess.run(
             ['compare', '-metric', 'AE', tmp_path, final_path, 'null:'],
             capture_output=True, text=True
@@ -83,7 +102,7 @@ def load_manifest(manifest_path):
     return {entry['md5']: entry for entry in data.get('downloads', [])}
 
 
-def check_file(file_path, manifest, raw_dir=None):
+def check_file(file_path, manifest, raw_dir=None, footer_path=None):
     file_md5 = md5_file(file_path)
 
     if file_md5 in manifest:
@@ -100,7 +119,7 @@ def check_file(file_path, manifest, raw_dir=None):
 
     for raw_file in set(raw_candidates):
         try:
-            if composite_pixels_match(raw_file, file_path):
+            if composite_pixels_match(raw_file, file_path, footer_path=footer_path):
                 raw_md5 = md5_file(raw_file)
                 in_manifest = raw_md5 in manifest
                 suffix = '' if in_manifest else ' (no manifest)'
@@ -152,7 +171,8 @@ def run_acceptance():
             sys.exit(2)
 
         raw_dir = str(raw_case['path'].parent)
-        verdict, reason = check_file(str(case['path']), manifest, raw_dir=raw_dir)
+        verdict, reason = check_file(str(case['path']), manifest, raw_dir=raw_dir,
+                                     footer_path=str(DEFAULT_FOOTER))
         evaluated += 1
         correct = (verdict == case['expected'])
 
@@ -189,6 +209,7 @@ def main():
     parser.add_argument('target', nargs='?', help='File or directory to check')
     parser.add_argument('--manifest', help='Path to provenance manifest JSON')
     parser.add_argument('--raw-dir', help='Directory containing raw DALL-E downloads')
+    parser.add_argument('--footer', help='Dated footer PNG (default: auto-build for today)')
     parser.add_argument('--acceptance', action='store_true', help='Run 3-way acceptance test')
     args = parser.parse_args()
 
@@ -215,19 +236,36 @@ def main():
         print(f'0 of 0 evaluated — NO FILES FOUND in {target}, gate is blind')
         sys.exit(3)
 
+    footer_path = args.footer
+    built_footer = None
+    if not footer_path:
+        today = datetime.date.today().isoformat()
+        built_footer = build_dated_footer(today)
+        if built_footer:
+            footer_path = built_footer
+            print(f'[footer] auto-built for {today}')
+        else:
+            print(f'[footer] WARNING: could not build dated footer, using default (may cause false REFUSE)')
+            footer_path = str(DEFAULT_FOOTER)
+
     evaluated = 0
     passed = 0
     refused = 0
 
-    for f in files:
-        verdict, reason = check_file(str(f), manifest, raw_dir=args.raw_dir)
-        evaluated += 1
-        mark = 'PASS' if verdict == 'PASS' else 'REFUSE'
-        if verdict == 'PASS':
-            passed += 1
-        else:
-            refused += 1
-        print(f'  [{mark}] {f.name} — {reason}')
+    try:
+        for f in files:
+            verdict, reason = check_file(str(f), manifest, raw_dir=args.raw_dir,
+                                         footer_path=footer_path)
+            evaluated += 1
+            mark = 'PASS' if verdict == 'PASS' else 'REFUSE'
+            if verdict == 'PASS':
+                passed += 1
+            else:
+                refused += 1
+            print(f'  [{mark}] {f.name} — {reason}')
+    finally:
+        if built_footer and os.path.exists(built_footer):
+            os.unlink(built_footer)
 
     print(f'\nEvaluated: {evaluated} of {len(files)}')
     print(f'Passed: {passed}, Refused: {refused}')
