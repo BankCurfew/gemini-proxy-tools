@@ -258,7 +258,7 @@ function heartbeat(taskId, pct, status) {
       fb = '1970-01-01 00:00:00';
     }
     ts = fb;
-    const alert = `${ts} | BotDev-Oracle | ${require('os').hostname()} | Alert | BotDev-Oracle | heartbeat » ALERT: HB timestamp construction failed, emitted fallback canonical stamp (${JSON.stringify(String(e && e.message))}) — investigate poster.js heartbeat()\n`;
+    const alert = `${ts} | Echo-Oracle | ${require('os').hostname()} | Alert | Echo-Oracle | heartbeat » ALERT: HB timestamp construction failed, emitted fallback canonical stamp (${JSON.stringify(String(e && e.message))}) — investigate poster.js heartbeat()\n`;
     try { fs.appendFileSync(path.join(process.env.HOME || '/home/curfew', '.oracle/feed.log'), alert); } catch {}
   }
   // Test-only pin (Designer addendum 3c95b8c + BoB doctrine): a loud throw belongs in CI (the
@@ -1215,9 +1215,20 @@ Examples:
         await sendPrompt(page, raw);
         break;
       }
-      case 'wait':
-        await waitForImage(page, args[0] || '#13');
+      case 'wait': {
+        // T1781: waitForImage() itself only reaches 95% (image-detected) — the 100%
+        // done HB otherwise only fires inside generate()'s post-verify/QA pipeline
+        // (line ~947), which this standalone wait path never runs. Without this,
+        // every prompt+wait custom-prompt gen orphans HB stream #13 at 95% by
+        // construction, and hb-checker eventually pages it as false STUCK. Fire the
+        // same 100% done stamp generate() uses on success; failure paths already
+        // emit their own loud HB from inside waitForImage() (refused/stalled/timeout).
+        const waitResult = await waitForImage(page, args[0] || '#13');
+        if (waitResult.ok) {
+          heartbeat(args[0] || '#13', 100, 'done');
+        }
         break;
+      }
       case 'download': case 'dl':
         await downloadImage(page, args[0], args[1]);
         break;
