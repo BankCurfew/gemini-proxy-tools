@@ -1,5 +1,6 @@
 {
   "chatgpt_url": "https://chatgpt.com",
+  "brand_chat_id": "6a2e2fee-f228-83ec-a55a-e85f221d620f",
   "output_dir": "/mnt/c/Users/mbank/OneDrive/AIA/Posters",
   "downloads_dir": "/mnt/c/Users/mbank/Downloads",
   "cdp_url": "http://127.0.0.1:9222",
@@ -11,12 +12,12 @@
   "heartbeat_oracle": "Designer-Oracle",
   "brands": {
     "iagencyaia": {
-      "chat_id": "6a768313-39bc-83ec-a55c-84bbc3afdb1c",
-      "created": "2026-08-08T01:15:03.398Z"
+      "chat_id": "6aa24848-509c-83ec-a7b0-ee313a2c4f4b",
+      "created": "2026-09-10T06:03:58.320Z"
     },
     "wealthbanks": {
-      "chat_id": "6a5ca1b9-b0fc-83ec-83a2-8daacc4d2360",
-      "created": "2026-07-19T10:06:55.549Z"
+      "chat_id": "6a9e2925-c118-83ec-bd88-56df8cfad384",
+      "created": "2026-09-07T03:02:06.085Z"
     }
   },
   "archived": {
