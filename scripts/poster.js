@@ -140,7 +140,7 @@ const TYPE_MAP = {
   promo:    { badge: 'PRM', name: 'Promo',            icon: 'gift',   color: 'red+gold' },
 };
 
-const BRAND_SEED = 'Logo: i=RED #D31145, Agency=BLACK #1a1a2e, AIA=RED #D31145. BG: textured off-white #f0ede8 with gray curved lines #c5c0b8 (2-3px). Three-layer: flat 2D cards + realistic heroes + illustrated icons. NO text unless exact Thai text given.';
+const BRAND_SEED = 'Top-right corner: ALWAYS leave it completely empty and clean for our logo overlay. Never draw any logo, wordmark or brand name anywhere in the image. BG: clean bright WHITE, warm and human (never dark, never textured, never off-white paper). Warm realistic hero photo + simple round icons, generous white space. Text colours: navy #1a1a2e, AIA red #D31145 for key Thai words. NO text unless exact Thai text given.';
 
 function loadBrandTemplate() {
   try {
@@ -161,10 +161,10 @@ function loadBrandTemplate() {
 const LOADED_TEMPLATE = loadBrandTemplate();
 
 const BRAND_TEMPLATE = LOADED_TEMPLATE || `Generate an image: {TYPE} poster, 9:16 vertical.
-Textured BG, generous spacing, correct logo (i=red Agency=black AIA=red),
+Clean white BG, generous spacing, top-right corner left EMPTY for the logo overlay (never draw a logo),
 header padding, Asian people.
 
-Badge: {BADGE_CODE} ({BADGE_NAME}) top-left with {BADGE_ICON} icon, {BADGE_COLOR}. Logo: iAgencyAIA top-right.
+Badge: {BADGE_CODE} ({BADGE_NAME}) top-left with {BADGE_ICON} icon, {BADGE_COLOR}. Top-right: leave empty (logo is composited later).
 
 Headline ({MOOD}, {ACCENT_COLOR}):
 {HEADLINE_TEXT}
@@ -360,7 +360,7 @@ async function rollBrandChat(page) {
   // Cross-brand contamination happened here: rotation re-seeded the WB chat with iAgencyAIA priming.
   const brandSlug = BRAND_FLAG || 'iagencyaia';
   const seedForBrand = {
-    iagencyaia: `${BRAND_SEED}\n\nYou are creating posters for iAgencyAIA brand. Always 9:16 vertical. Textured backgrounds, generous spacing, Asian people. Acknowledge with "Ready for iagencyaia posters."`,
+    iagencyaia: `${BRAND_SEED}\n\nYou are creating posters for iAgencyAIA brand. Always 9:16 vertical. Clean white backgrounds, generous spacing, Asian people. Acknowledge with "Ready for iagencyaia posters."`,
     wealthbanks: `Brand: WealthBanks — Prestige White theme. BG: ivory #FDFCF9. Palette: navy #1A2A45 + gold #C1A368 + bronze. Asian Thai models 30-50, warm natural lighting, NO text in image (CAR-dalle-nav). Asian family/couple planning finances at ivory-warm table. Acknowledge with "Ready for wealthbanks posters."`,
   };
   const primer = seedForBrand[brandSlug] || seedForBrand.iagencyaia;
@@ -433,7 +433,7 @@ function resizeToIG(filePath) {
   try {
     // Scale to fit within 1080x1920 maintaining aspect ratio, then pad with brand BG color
     execSync(
-      `convert "${filePath}" -resize 1080x1920 -gravity center -background "#f0ede8" -extent 1080x1920 "${outPath}"`,
+      `convert "${filePath}" -resize 1080x1920 -gravity center -background "#FFFFFF" -extent 1080x1920 "${outPath}"`,
       { timeout: 15000 }
     );
 
@@ -441,7 +441,7 @@ function resizeToIG(filePath) {
       const size = Math.round(fs.statSync(outPath).size / 1024);
       // Replace original with resized
       fs.renameSync(outPath, filePath);
-      console.log(`  Resized → 1080x1920 (${size}KB, padded on #f0ede8)`);
+      console.log(`  Resized → 1080x1920 (${size}KB, padded on #FFFFFF)`);
       return filePath;
     }
   } catch (e) {
