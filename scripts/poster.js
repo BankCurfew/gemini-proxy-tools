@@ -131,14 +131,21 @@ const BRAND_CI_PATH = path.join(
 
 // ── T7: Load brand template from DocCon CLAUDE_brand_ci.md (Designer's proven template) ──
 
+// T2197/check 12: badge label <-> hex = the series-colour registry (DocCon CLAUDE_daily_news_pipeline_conduct.md,
+// mirrored in brand_ci §9). Exact labels, never codes (MB/FND/VRL were retired). Navy pill = fallback for no-series posters.
 const TYPE_MAP = {
-  atw:      { badge: 'ATW', name: 'Around The World', icon: 'globe',  color: 'blue' },
-  mb:       { badge: 'MB',  name: 'Market Brief',    icon: 'chart',  color: 'green' },
-  fund:     { badge: 'FND', name: 'Fund Holdings',   icon: 'coins',  color: 'gold' },
-  breaking: { badge: 'BRK', name: 'Breaking',        icon: 'alert',  color: 'red' },
-  viral:    { badge: 'VRL', name: 'Viral',            icon: 'fire',   color: 'purple' },
-  promo:    { badge: 'PRM', name: 'Promo',            icon: 'gift',   color: 'red+gold' },
+  atw:        { badge: 'ATW',        name: 'Around The World', icon: 'globe',  colorName: 'blue',   color: '#3b82f6' },
+  mb:         { badge: 'MARKET',     name: 'Market Brief',     icon: 'chart',  colorName: 'green',  color: '#16a34a' },
+  holdings:   { badge: 'HOLDINGS',   name: 'Fund Holdings',    icon: 'coins',  colorName: 'gold',   color: '#fbbf24' },
+  insights:   { badge: 'INSIGHTS',   name: 'Fund Insights',    icon: 'chart',  colorName: 'purple', color: '#8b5cf6' },
+  breaking:   { badge: 'BREAKING',   name: 'Breaking',         icon: 'alert',  colorName: 'red',    color: '#dc2626' },
+  viral:      { badge: 'VIRAL',      name: 'Viral',            icon: 'fire',   colorName: 'orange', color: '#f97316' },
+  motivation: { badge: 'MOTIVATION', name: 'Motivation',       icon: 'flame',  colorName: 'pink',   color: '#ec4899' },
+  aia:        { badge: 'AIA',        name: 'AIA Event',        icon: 'star',   colorName: 'teal',   color: '#0d9488' },
+  education:  { badge: 'EDUCATION',  name: 'Education',        icon: 'book',   colorName: 'cyan',   color: '#06b6d4' },
+  promo:      { badge: 'PROMO',      name: 'Promo',            icon: 'gift',   colorName: 'navy',   color: '#1a1a2e' }, // not a registered series: navy fallback
 };
+TYPE_MAP.fund = TYPE_MAP.holdings; // old alias: 'fund' was split into HOLDINGS / INSIGHTS (T1701)
 
 const BRAND_SEED = 'Top-right corner: ALWAYS leave it completely empty and clean for our logo overlay. Never draw any logo, wordmark or brand name anywhere in the image. BG: clean bright WHITE, warm and human (never dark, never textured, never off-white paper). Warm realistic hero photo + simple round icons, generous white space. Text colours: navy #1a1a2e, AIA red #D31145 for key Thai words. NO text unless exact Thai text given.';
 
@@ -861,7 +868,7 @@ async function generate(page, type, brief, taskId) {
   if (type === 'raw') {
     prompt = brief;
   } else {
-    const tm = TYPE_MAP[type] || { badge: type.toUpperCase(), name: type, icon: 'star', color: 'blue' };
+    const tm = TYPE_MAP[type] || { badge: type.toUpperCase(), name: type, icon: 'star', colorName: 'navy', color: '#1a1a2e' };
     // T599: select brand template by --brand (destination rule)
     const brandTpl = BRAND_FLAG === 'wealthbanks' ? BRAND_TEMPLATE_WEALTHBANKS : BRAND_TEMPLATE;
     prompt = brandTpl
@@ -869,18 +876,18 @@ async function generate(page, type, brief, taskId) {
       .replace('{BADGE_CODE}', tm.badge)
       .replace('{BADGE_NAME}', tm.name)
       .replace('{BADGE_ICON}', tm.icon)
-      .replace('{BADGE_COLOR}', tm.color)
+      .replace('{BADGE_COLOR}', `${tm.colorName} ${tm.color} pill`)
       .replace('{BADGE}', `${tm.badge} (${tm.name})`)
       .replace('{DATE}', dateStr)
       .replace('{MOOD}', 'professional')
-      .replace('{ACCENT_COLOR}', tm.color)
+      .replace('{ACCENT_COLOR}', 'NAVY DARK BLUE #1a1a2e, key words in RED #D31145')
       .replace('{HEADLINE_TEXT}', brief)
       .replace('{HEADLINE}', brief)
       .replace('{HERO_DESCRIPTION}', brief)
       .replace('{HERO}', brief)
       .replace('{DATA_ITEMS}', '')
       .replace('{CARDS}', '')
-      .replace('{COLOR_NOTES}', tm.color === 'red' ? 'Dark background #0a0a12' : 'Light theme')
+      .replace('{COLOR_NOTES}', 'Clean white theme')
       .replace('{LIGHT_NOTES}', 'Light Prestige White theme')
       .replace('{SOURCE}', BRAND_FLAG === 'wealthbanks' ? 'wealthbanks.net' : 'iAgencyAIA');
   }
@@ -1160,7 +1167,7 @@ Commands:
   images              List all DALL-E images with index numbers
   roll-brand          Force rotate to fresh brand chat
 
-Types: atw (Around The World), mb (Market Brief), fund (Fund Holdings), raw (custom prompt)
+Types: atw · mb (MARKET) · holdings · insights · breaking · viral · motivation · aia · education · promo (navy) · fund (= holdings) · raw (custom prompt)
 
 Flags:
   --brand <name>      Target specific brand (multi-brand config)
