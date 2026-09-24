@@ -299,7 +299,9 @@ async function connect() {
       );
     }
     console.log(`[connect] ChatGPT tab at ${chatgptPage.url()} — navigating to brand chat...`);
-    await chatgptPage.goto(BRAND_CHAT_URL, { waitUntil: 'networkidle2' });
+    // T2197: build the URL from activeChatId. BRAND_CHAT_URL is the bare home URL for brand-exempt
+    // commands (status/images), so navigating there could never contain the chat id and always failed.
+    await chatgptPage.goto(`${cfg.chatgpt_url}/c/${activeChatId}`, { waitUntil: 'networkidle2' });
     await sleep(3000);
     // Verify navigation reached the target chat — ChatGPT may redirect to home or new chat
     if (!chatgptPage.url().includes(activeChatId)) {
@@ -1101,8 +1103,8 @@ async function newChat(page, rawBrandName) {
   console.log(`[new-chat] Saved to poster.config.json: brands.${brandName}.chat_id = ${chatId}`);
   console.log(`\n✅ Brand "${brandName}" ready. Use: node poster.js generate <type> <brief> --brand ${brandName}`);
 
-  // Keep the new tab open for Designer to use
-  console.log(`[new-chat] New tab kept open at: ${newPage.url()}`);
+  // The tab is closed by cleanupCreatedPages() on exit; connect() opens the chat by id next run (T2197).
+  console.log(`[new-chat] Chat saved server-side at: ${newPage.url()} (this tab closes on exit)`);
 }
 
 function stripFlags(argv) {
