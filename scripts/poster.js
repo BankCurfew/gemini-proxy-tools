@@ -140,7 +140,7 @@ const TYPE_MAP = {
   promo:    { badge: 'PRM', name: 'Promo',            icon: 'gift',   color: 'red+gold' },
 };
 
-const BRAND_SEED = 'Logo: i=RED #C8102E, Agency=BLACK #1a1a2e, AIA=RED #C8102E. BG: textured off-white #f0ede8 with gray curved lines #c5c0b8 (2-3px). Three-layer: flat 2D cards + realistic heroes + illustrated icons. NO text unless exact Thai text given.';
+const BRAND_SEED = 'Logo: i=RED #D31145, Agency=BLACK #1a1a2e, AIA=RED #D31145. BG: textured off-white #f0ede8 with gray curved lines #c5c0b8 (2-3px). Three-layer: flat 2D cards + realistic heroes + illustrated icons. NO text unless exact Thai text given.';
 
 function loadBrandTemplate() {
   try {
