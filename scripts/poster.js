@@ -1096,6 +1096,29 @@ async function newChat(page, rawBrandName) {
 
   console.log(`[new-chat] NEW Chat ID captured: ${chatId}`);
 
+  // T2197 (bob): never write an unsaved id into poster.config. Confirm the server has the chat
+  // with a finished assistant reply to the seed before saving; otherwise fail and keep the old id.
+  let persisted = null;
+  for (let i = 0; i < 30 && !(persisted && persisted.ok); i++) {
+    await sleep(1000);
+    persisted = await newPage.evaluate(async (id) => {
+      try {
+        const s = await (await fetch('/api/auth/session')).json();
+        const r = await fetch('/backend-api/conversation/' + id, { headers: { Authorization: 'Bearer ' + s.accessToken } });
+        if (!r.ok) return { ok: false, status: r.status };
+        const j = await r.json();
+        const done = Object.values(j.mapping || {}).some(n => n.message && n.message.author.role === 'assistant' && n.message.status === 'finished_successfully');
+        return { ok: done, status: r.status, temporary: !!j.is_temporary_chat };
+      } catch (e) { return { ok: false, status: 'error: ' + e.message }; }
+    }, chatId);
+  }
+  if (!persisted || !persisted.ok || persisted.temporary) {
+    console.error(`[new-chat] FAILED: chat ${chatId} not confirmed saved on the server (${JSON.stringify(persisted)}) — poster.config.json NOT changed`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`[new-chat] server confirms chat saved (HTTP ${persisted.status}, seed reply finished)`);
+
   // Save to config
   if (!cfg.brands) cfg.brands = {};
   cfg.brands[brandName] = { chat_id: chatId, created: new Date().toISOString() };
