@@ -383,14 +383,8 @@ async function rollBrandChat(page) {
 
   if (typed) {
     await sleep(300);
-    await page.evaluate(() => {
-      const btn = document.querySelector('button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]');
-      if (btn && !btn.disabled) btn.click();
-      else {
-        const el = document.querySelector('#prompt-textarea');
-        if (el) el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-      }
-    });
+    const via = await clickSend(page);
+    console.log(`[primer] send via ${via || 'NOTHING — no send control found'}`);
     await sleep(5000); // Wait for ack
   }
 
@@ -486,6 +480,29 @@ function qaGate(filePath) {
   }
 }
 
+// T2167: ChatGPT's send button is now <button type="submit" aria-label="Send"> inside the composer form, with no
+// data-testid (probed 2026-09-24, read-only). None of the old selectors matched, so new-chat never sent its seed and
+// waited 45s for a /c/<id> that could not appear. One helper for every send site; returns the path that clicked
+// (or null) so callers can fail loudly instead of waiting on a URL.
+async function clickSend(page) {
+  return page.evaluate(() => {
+    const known = document.querySelector('button[data-testid="send-button"], button[data-testid="composer-send-button"], '
+      + 'button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Send"]');
+    if (known && !known.disabled) { known.click(); return 'send-button'; }
+    const submit = document.querySelector('form button[type="submit"]:not([disabled])');
+    if (submit) { submit.click(); return 'form-submit'; }
+    const form = document.querySelector('form, div[class*="composer"]');
+    if (form) {
+      for (const b of form.querySelectorAll('button:not([disabled])')) {
+        if (b.querySelector('svg') || b.querySelector('path')) { b.click(); return 'svg-fallback'; }
+      }
+    }
+    const el = document.querySelector('#prompt-textarea, div[contenteditable="true"]');
+    if (el) { el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true })); return 'enter-key'; }
+    return null;
+  });
+}
+
 async function sendPrompt(page, prompt) {
   const typed = await page.evaluate((text) => {
     const el = document.querySelector('#prompt-textarea, textarea[data-id], div[contenteditable="true"]');
@@ -517,24 +534,8 @@ async function sendPrompt(page, prompt) {
 
   await sleep(500);
 
-  await page.evaluate(() => {
-    // Broader send button detection — works in both regular and project chats
-    const btn = document.querySelector('button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]');
-    if (btn && !btn.disabled) { btn.click(); return; }
-    // Fallback: find enabled button with SVG arrow in the composer area
-    const form = document.querySelector('form, div[class*="composer"]');
-    if (form) {
-      const buttons = form.querySelectorAll('button:not([disabled])');
-      for (const b of buttons) {
-        if (b.querySelector('svg') || b.querySelector('path')) { b.click(); break; }
-      }
-    }
-    // Last resort: Enter key on the input
-    const el = document.querySelector('#prompt-textarea');
-    if (el) {
-      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-    }
-  });
+  const via = await clickSend(page);
+  console.log(`[send] via ${via || 'NOTHING — no send control found'}`);
 
   console.log('Prompt sent. Waiting for DALL-E generation...');
   return true;
@@ -1053,13 +1054,15 @@ async function newChat(page, rawBrandName) {
 
   await sleep(1000);
 
-  // Click send button
-  await newPage.evaluate(() => {
-    const btn = document.querySelector('[data-testid="send-button"]')
-      || document.querySelector('button[aria-label="Send prompt"]')
-      || document.querySelector('button[data-testid="composer-send-button"]');
-    if (btn) btn.click();
-  });
+  // Click send button (T2167: shared helper; a miss fails now instead of after a 45s URL wait)
+  const via = await clickSend(newPage);
+  console.log(`[new-chat] seed sent via ${via || 'NOTHING'}`);
+  if (!via) {
+    console.error('[new-chat] FAILED: no send control found in the composer (ChatGPT DOM changed?) — seed NOT sent');
+    await newPage.close();
+    process.exitCode = 1;
+    return;
+  }
 
   // Wait for URL to change to /c/<id>
   console.log('[new-chat] Waiting for chat ID in URL...');
