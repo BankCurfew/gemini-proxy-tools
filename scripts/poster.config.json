@@ -27,6 +27,51 @@
       "created": "2026-09-27",
       "set_by": "designer T2301 (bob chat)",
       "note": "ONE chat for all EDUCATION posters; no new-chat per poster"
+    },
+    "iagencyaia-atw": {
+      "chat_id": "6ab8d17b-1658-83ec-9f7d-feb1ac8a2659",
+      "base_brand": "iagencyaia",
+      "title": "ATW · Series 2026-09",
+      "project": "iAgencyAIA",
+      "created": "2026-09-27",
+      "set_by": "designer T2301 (bob chats)",
+      "note": "ONE chat for all ATW posters; no new-chat per poster"
+    },
+    "iagencyaia-market": {
+      "chat_id": "6ab8d20f-9474-83ec-afad-603919e39fab",
+      "base_brand": "iagencyaia",
+      "title": "MARKET · Series 2026-09",
+      "project": "iAgencyAIA",
+      "created": "2026-09-27",
+      "set_by": "designer T2301 (bob chats)",
+      "note": "ONE chat for all MARKET posters; no new-chat per poster"
+    },
+    "iagencyaia-viral": {
+      "chat_id": "6ab8d28f-9460-83ec-9290-31f2505f6ed3",
+      "base_brand": "iagencyaia",
+      "title": "VIRAL · Series 2026-09",
+      "project": "iAgencyAIA",
+      "created": "2026-09-27",
+      "set_by": "designer T2301 (bob chats)",
+      "note": "ONE chat for all VIRAL posters; no new-chat per poster"
+    },
+    "iagencyaia-motivation": {
+      "chat_id": "6ab8d30e-a934-83ec-a076-8a73da6a5e26",
+      "base_brand": "iagencyaia",
+      "title": "MOTIVATION · Series 2026-09",
+      "project": "iAgencyAIA",
+      "created": "2026-09-27",
+      "set_by": "designer T2301 (bob chats)",
+      "note": "ONE chat for all MOTIVATION posters; no new-chat per poster"
+    },
+    "iagencyaia-breaking": {
+      "chat_id": "6ab8d38d-a198-83ec-8080-d6aa3a8d3cd1",
+      "base_brand": "iagencyaia",
+      "title": "BREAKING · Series 2026-09",
+      "project": "iAgencyAIA",
+      "created": "2026-09-27",
+      "set_by": "designer T2301 (bob chats)",
+      "note": "ONE chat for all BREAKING posters; no new-chat per poster"
     }
   },
   "archived": {
