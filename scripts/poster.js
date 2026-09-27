@@ -67,7 +67,7 @@ function getActiveBrandChatId() {
 }
 
 // Commands that don't need --brand
-const BRAND_EXEMPT_CMDS = new Set(['help', 'resolve', 'status', 'st', 'images', 'imgs']);
+const BRAND_EXEMPT_CMDS = new Set(['help', 'resolve', 'status', 'st', 'images', 'imgs', 'rename', 'move', 'projects', 'project-show']);
 const currentCmd = process.argv[2];
 let BRAND_CHAT_URL;
 if (BRAND_EXEMPT_CMDS.has(currentCmd) || !currentCmd) {
@@ -77,6 +77,12 @@ if (BRAND_EXEMPT_CMDS.has(currentCmd) || !currentCmd) {
 }
 const FORK_CHAT_ID = null; // legacy removed — brands.<slug>.chat_id is the sole source
 const FORCE_FLAG = process.argv.includes('--force');
+// gpt#20: value flags for the Project / chat-ops commands
+const VALUE_FLAGS = ['--brand', '--project', '--title', '--from', '--ledger'];
+function flagValue(name) {
+  const i = process.argv.indexOf(name);
+  return i >= 0 && process.argv[i + 1] !== undefined ? process.argv[i + 1] : null;
+}
 const DRY_RUN = process.argv.includes('--dry-run');
 
 // ── T599: Cross-brand contamination guard ──
@@ -704,6 +710,163 @@ async function logCmd(page, outPath) {
   console.log(`[log] ${turns.length} turns · ${nAtt} attached · ${nImg} generated → ${path.resolve(outPath)}`);
 }
 
+// ── gpt#20 items 4-6: ChatGPT Projects + chat housekeeping via the web app's own backend-api ──
+// Probed 27/9 on disposable [TEST] chats with read-back after every write:
+//   PATCH /backend-api/conversation/<id> {"title": t}      → renames (list read-back shows it)
+//   PATCH /backend-api/conversation/<id> {"gizmo_id": g}   → moves into Project g (shows in the Project's list)
+//   PATCH /backend-api/conversation/<id> {"gizmo_id": ""}  → removes from its Project.
+//     {"gizmo_id": null} ANSWERS {"success":true} AND DOES NOTHING — so every op is read back, never trusted.
+//   GET /backend-api/conversation/<id> returns 429 under light bursts, so read-back uses the list endpoints.
+// The access token stays inside the page; nothing here prints it.
+async function api(page, method, url, body) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const r = await page.evaluate(async (method, url, body) => {
+      if (!window.__gpt20Tok) window.__gpt20Tok = (await (await fetch('/api/auth/session')).json()).accessToken;
+      const res = await fetch(url, { method, headers: { Authorization: 'Bearer ' + window.__gpt20Tok, 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body) });
+      let json = null; try { json = await res.json(); } catch {}
+      return { status: res.status, json };
+    }, method, url, body);
+    if (r.status !== 429) return r;
+    await sleep(2000 * (attempt + 1));
+  }
+  return { status: 429, json: null };
+}
+
+async function listProjects(page) {
+  const out = []; let cursor = null;
+  for (let i = 0; i < 20; i++) {
+    const r = await api(page, 'GET', `/backend-api/gizmos/snorlax/sidebar?conversations_per_gizmo=0${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+    if (r.status !== 200) throw new Error(`project list HTTP ${r.status}`);
+    for (const it of r.json.items || []) {
+      const g = (it.gizmo && it.gizmo.gizmo) || it.gizmo || {};
+      if (g.id) out.push({ id: g.id, name: (g.display && g.display.name) || '' });
+    }
+    cursor = r.json.cursor; if (!cursor) break;
+  }
+  return out;
+}
+
+// name → gizmo id. "none" → "" (remove from project). Exact, case-insensitive; ambiguity refuses.
+async function resolveProject(page, name) {
+  if (!name) throw new Error('--project <name> is required');
+  if (/^none$/i.test(name)) return { id: '', name: '(no project)' };
+  const all = await listProjects(page);
+  const hit = name.startsWith('g-p-') ? all.filter((p) => p.id === name) : all.filter((p) => p.name.toLowerCase() === name.toLowerCase());
+  if (hit.length !== 1) throw new Error(`project "${name}" matched ${hit.length} (have: ${all.map((p) => p.name).join(', ')})`);
+  return hit[0];
+}
+
+async function projectConversations(page, gid) {
+  const out = new Map(); let cursor = '0';
+  for (let i = 0; i < 40 && cursor !== null; i++) {
+    const r = await api(page, 'GET', `/backend-api/gizmos/${gid}/conversations?cursor=${encodeURIComponent(cursor)}&limit=50&owned_only=false`);
+    if (r.status !== 200) throw new Error(`project conversations HTTP ${r.status}`);
+    for (const it of r.json.items || []) out.set(it.id, { title: it.title, gizmo_id: it.gizmo_id || '' });
+    cursor = r.json.cursor || null;
+  }
+  return out;
+}
+
+// id → {title, gizmo_id} (project chats included; 906 rows = 10 pages on 27/9). Pages newest-first and
+// stops once every wanted id is seen, 1s apart — a full rescan per op hit ChatGPT's 429 during testing.
+async function conversationIndex(page, wantIds) {
+  const out = new Map();
+  const want = wantIds ? new Set(wantIds) : null;
+  for (let off = 0; off < 20000; off += 100) {
+    if (off) await sleep(1000);
+    const r = await api(page, 'GET', `/backend-api/conversations?offset=${off}&limit=100&order=updated`);
+    if (r.status !== 200) throw new Error(`conversation list HTTP ${r.status} at offset ${off}`);
+    const items = r.json.items || [];
+    for (const it of items) { out.set(it.id, { title: it.title, gizmo_id: it.gizmo_id || '' }); if (want) want.delete(it.id); }
+    if (items.length < 100 || (want && !want.size)) break;
+  }
+  return out;
+}
+
+const CHAT_OPS_LEDGER = path.join(process.env.HOME || '/home/curfew', '.oracle/chatgpt-chat-ops.jsonl');
+
+// ops: [{op:'rename', id, title} | {op:'move', id, gizmo_id, project}]. Every row gets a ledger line with
+// before / after as READ BACK from the list, not the PATCH answer. No deletes exist in this path.
+async function chatOps(page, ops, ledgerPath) {
+  const ledger = ledgerPath || CHAT_OPS_LEDGER;
+  const before = await conversationIndex(page, ops.map((o) => o.id));
+  console.log(`[chat-ops] ${ops.length} op(s) · index ${before.size} conversations${DRY_RUN ? ' · DRY RUN' : ''}`);
+  const want = (o) => (o.op === 'rename' ? { title: o.title } : { gizmo_id: o.gizmo_id });
+  const done = [];
+  for (const o of ops) {
+    const b = before.get(o.id);
+    if (!b) { done.push({ ...o, result: 'not-found' }); console.log(`  NOT FOUND  ${o.id}`); continue; }
+    const w = want(o);
+    if (Object.entries(w).every(([k, v]) => b[k] === v)) { done.push({ ...o, before: b, result: 'no-change' }); continue; }
+    if (DRY_RUN) { done.push({ ...o, before: b, result: 'dry-run' }); console.log(`  would ${o.op} ${o.id.slice(0, 8)} "${b.title}" → ${JSON.stringify(w)}`); continue; }
+    const r = await api(page, 'PATCH', `/backend-api/conversation/${o.id}`, w);
+    done.push({ ...o, before: b, patch: r.status });
+    await sleep(700);
+  }
+  const after = DRY_RUN ? before : await conversationIndex(page, done.filter((d) => d.patch).map((d) => d.id));
+  let ok = 0, bad = 0;
+  for (const d of done) {
+    if (d.result) { if (d.result === 'not-found') bad++; continue; }
+    const a = after.get(d.id) || null;
+    const w = want(d);
+    d.after = a;
+    d.result = a && Object.entries(w).every(([k, v]) => a[k] === v) ? 'ok' : 'FAILED';
+    if (d.result === 'ok') ok++; else { bad++; console.log(`  FAILED  ${d.id} patch=${d.patch} after=${JSON.stringify(a)}`); }
+  }
+  if (!DRY_RUN) {
+    fs.mkdirSync(path.dirname(ledger), { recursive: true });
+    const ts = new Date().toISOString();
+    fs.appendFileSync(ledger, done.map((d) => JSON.stringify({ ts, op: d.op, id: d.id, want: want(d), project: d.project, before: d.before || null, after: d.after || null, patch: d.patch || null, result: d.result })).join('\n') + '\n');
+  }
+  const count = (r) => done.filter((d) => d.result === r).length;
+  console.log(`[chat-ops] ok ${ok} · failed ${bad - count('not-found')} · not-found ${count('not-found')} · no-change ${count('no-change')}${DRY_RUN ? ` · dry-run ${count('dry-run')}` : ` · ledger ${ledger}`}`);
+  if (bad) process.exitCode = 1;
+}
+
+function readOpsFile(file) {
+  return fs.readFileSync(file, 'utf-8').split('\n').map((l) => l.replace(/\r$/, '')).filter((l) => l.trim() && !l.startsWith('#'));
+}
+
+async function renameCmd(page, args) {
+  const from = flagValue('--from');
+  const ops = from
+    ? readOpsFile(from).map((l) => { const [id, ...t] = l.split('\t'); return { op: 'rename', id: id.trim(), title: t.join('\t').trim() }; })
+    : [{ op: 'rename', id: args[0], title: args.slice(1).join(' ').trim() }];
+  if (!ops.length || ops.some((o) => !o.id || !o.title)) {
+    console.error("Usage: poster.js rename <chat_id> '<title>'   |   rename --from <file.tsv>  (chat_id<TAB>title per line)");
+    process.exitCode = 1; return;
+  }
+  await chatOps(page, ops, flagValue('--ledger'));
+}
+
+async function moveCmd(page, args) {
+  const from = flagValue('--from');
+  const ids = from ? readOpsFile(from).map((l) => l.split('\t')[0].trim()) : args;
+  if (!ids.length) { console.error('Usage: poster.js move <chat_id>... --project <name|none>   |   move --from <file> --project <name|none>'); process.exitCode = 1; return; }
+  const proj = await resolveProject(page, flagValue('--project'));
+  console.log(`[move] → ${proj.name} ${proj.id || ''}`);
+  await chatOps(page, ids.map((id) => ({ op: 'move', id, gizmo_id: proj.id, project: proj.name })), flagValue('--ledger'));
+}
+
+async function projectsCmd(page) {
+  for (const p of await listProjects(page)) console.log(`${p.id}  ${p.name}`);
+}
+
+// Read-only: what the Project holds right now (instructions fingerprint + files), for verifying T2301 setup.
+async function projectShowCmd(page, args) {
+  const proj = await resolveProject(page, flagValue('--project') || args.join(' '));
+  const r = await api(page, 'GET', `/backend-api/gizmos/${proj.id}`);
+  if (r.status !== 200) { console.error(`project HTTP ${r.status}`); process.exitCode = 1; return; }
+  const g = r.json.gizmo || {};
+  const instr = g.instructions || '';
+  console.log(`project: ${proj.name} ${proj.id}`);
+  console.log(`instructions: ${instr.length} chars · md5 ${promptHash(instr)} · "${instr.split('\n')[0].slice(0, 100)}"`);
+  for (const f of r.json.files || []) console.log(`file: ${f.name} (${f.size || '?'} bytes)`);
+  const convs = await projectConversations(page, proj.id);
+  console.log(`conversations: ${convs.size}`);
+}
+
 // ── T2: Read last assistant message ──
 // gpt#20 (2026-09-27): ChatGPT dropped data-message-author-role. A conversation is now a list of
 // [data-turn-key] blocks, each holding one exchange: the user text in [data-user-message-bubble], an
@@ -1305,6 +1468,13 @@ async function newChat(page, rawBrandName) {
       try {
         const s = await (await fetch('/api/auth/session')).json();
         const r = await fetch('/backend-api/conversation/' + id, { headers: { Authorization: 'Bearer ' + s.accessToken } });
+        if (r.status === 429) {
+          // gpt#20: this GET rate-limits under light bursts; the list endpoint is the fallback proof it exists
+          const l = await (await fetch('/backend-api/conversations?offset=0&limit=20&order=updated', { headers: { Authorization: 'Bearer ' + s.accessToken } })).json();
+          const it = (l.items || []).find((i) => i.id === id);
+          const turnDone = !document.querySelector('button[data-testid="stop-button"], button[aria-label^="Stop"]');
+          return { ok: !!it && turnDone, status: '429→list', temporary: false };
+        }
         if (!r.ok) return { ok: false, status: r.status };
         const j = await r.json();
         const done = Object.values(j.mapping || {}).some(n => n.message && n.message.author.role === 'assistant' && n.message.status === 'finished_successfully');
@@ -1330,13 +1500,65 @@ async function newChat(page, rawBrandName) {
   console.log(`[new-chat] Chat saved server-side at: ${newPage.url()} (this tab closes on exit)`);
 }
 
+// gpt#20 item 5: a chat born INSIDE a Project, titled, with the real first message (no readiness primer —
+// bob counted 90 "Poster readiness response" chats since 1 Sep, one per run). A chat only exists once a
+// message is sent, so the first message is required. Title is set after the first reply finishes because
+// ChatGPT's auto-title lands with that reply and would overwrite an earlier rename.
+async function newProjectChat(page, brandName, firstMessage) {
+  const title = (flagValue('--title') || '').trim();
+  if (!title || !firstMessage.trim()) {
+    console.error("Usage: poster.js new-chat --brand <b> --project <name> --title '<SERIES · YYYY-MM · topic>' <first message>");
+    process.exitCode = 1; return;
+  }
+  const bc = assertBrandMatch(brandName, title + ' ' + firstMessage);
+  if (!bc.ok) { console.error(`\n🚫 ABORT (T599): ${bc.reason}`); process.exitCode = 4; return; }
+  const tab = await page.browser().newPage();
+  _createdPages.push(tab);
+  await tab.goto(cfg.chatgpt_url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  const proj = await resolveProject(tab, flagValue('--project'));
+  if (!proj.id) { console.error('new-chat: --project none makes no sense here'); process.exitCode = 1; return; }
+  if (DRY_RUN) { console.log(`[dry-run] would start a chat in ${proj.name} titled "${title}"`); return; }
+  const known = new Set((await projectConversations(tab, proj.id)).keys());
+  await tab.goto(`${cfg.chatgpt_url}/g/${proj.id}/project`, { waitUntil: 'networkidle2', timeout: 30000 });
+  await sleep(2500);
+  if (!(await sendPrompt(tab, firstMessage))) { process.exitCode = 1; return; }
+  let chatId = null;
+  for (let i = 0; i < 45 && !chatId; i++) {
+    await sleep(1000);
+    const m = tab.url().match(/\/c\/([a-f0-9-]{36})/);
+    if (m && !known.has(m[1])) chatId = m[1];
+  }
+  if (!chatId) { console.error(`[new-chat] FAILED: no new /c/<id> after 45s (url ${tab.url()}) — config NOT changed`); process.exitCode = 1; return; }
+  console.log(`[new-chat] chat ${chatId} — waiting for the first reply to finish`);
+  const deadline = Date.now() + 180000;
+  for (;;) {
+    const turns = await readTurns(tab);
+    if (turns.length && turns[turns.length - 1].hasAssistant && !(await isStreaming(tab))) break;
+    if (Date.now() > deadline) { console.error('⚠️  first reply still running after 180s — titling anyway'); break; }
+    await sleep(2000);
+  }
+  await sleep(3000); // let the auto-title land first
+  let row = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await api(tab, 'PATCH', `/backend-api/conversation/${chatId}`, { title });
+    await sleep(2500);
+    row = (await projectConversations(tab, proj.id)).get(chatId) || null;
+    if (row && row.title === title) break;
+  }
+  if (!row) { console.error(`[new-chat] FAILED: ${chatId} is not in project ${proj.name} — config NOT changed`); process.exitCode = 1; return; }
+  if (row.title !== title) { console.error(`[new-chat] FAILED: title reads back "${row.title}" — config NOT changed`); process.exitCode = 1; return; }
+  if (!cfg.brands) cfg.brands = {};
+  cfg.brands[brandName] = { chat_id: chatId, created: new Date().toISOString(), project: proj.id, title };
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf-8');
+  logToFeed(chatId, promptHash(firstMessage), 'new-project-chat');
+  console.log(`[new-chat] ✅ in ${proj.name} · titled "${title}" (read back) · brands.${brandName}.chat_id = ${chatId}`);
+}
+
 function stripFlags(argv) {
   const out = [];
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--brand' || argv[i] === '--force' || argv[i] === '--dry-run') {
-      if (argv[i] === '--brand') i++; // skip the value too
-      continue;
-    }
+    if (VALUE_FLAGS.includes(argv[i])) { i++; continue; } // skip the value too
+    if (argv[i] === '--force' || argv[i] === '--dry-run' || argv[i] === '--wait') continue;
     out.push(argv[i]);
   }
   return out;
@@ -1362,6 +1584,14 @@ Commands:
   attach <img>... [msg]  Upload image(s) into the composer; with msg = send together (read-back checks the turn)
   reply [--wait]      Print the last ChatGPT reply TEXT (no images); --wait = until it stops writing
   log <out.md>        Save the whole conversation (user/assistant text + image ids) to a file
+  new-chat --brand <b> --project <name> --title '<t>' <first message>
+                      Chat born inside a Project, titled (read back), no primer; saves chat_id
+  projects            List Projects (id + name)
+  project-show <name> Project instructions fingerprint + files + chat count (read-only)
+  rename <chat_id> '<title>'  |  rename --from <file.tsv>          (chat_id<TAB>title)
+  move <chat_id>... --project <name|none>  |  move --from <file> --project <name|none>
+                      Batch-safe; every op read back from the list + ledger ~/.oracle/chatgpt-chat-ops.jsonl
+                      (--ledger <file> to override; --dry-run to plan). No deletes exist.
 
 Types: atw · mb (MARKET) · holdings · insights · breaking · viral · motivation · aia · education · promo (navy) · fund (= holdings) · raw (custom prompt)
 
@@ -1421,6 +1651,22 @@ Examples:
       process.exitCode = code;
       return;
     }
+  }
+
+  // gpt#20: account-level ops run in their own tab and never touch a brand chat
+  const OWN_TAB_CMDS = { rename: renameCmd, move: moveCmd, projects: projectsCmd, 'project-show': projectShowCmd };
+  if (OWN_TAB_CMDS[cmd]) {
+    const browser = await puppeteer.connect({ browserURL: cfg.cdp_url, defaultViewport: null, protocolTimeout: cfg.cdp_protocol_timeout });
+    const page = await browser.newPage();
+    _createdPages.push(page);
+    try {
+      await page.goto(cfg.chatgpt_url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await OWN_TAB_CMDS[cmd](page, args);
+    } finally {
+      await cleanupCreatedPages();
+      browser.disconnect();
+    }
+    return;
   }
 
   const { browser, page } = await connect();
@@ -1491,7 +1737,8 @@ Examples:
           process.exitCode = 1;
           break;
         }
-        await newChat(page, brandName);
+        if (flagValue('--project')) await newProjectChat(page, brandName, args.join(' '));
+        else await newChat(page, brandName);
         break;
       }
       default:
