@@ -12,12 +12,21 @@
   "heartbeat_oracle": "Designer-Oracle",
   "brands": {
     "iagencyaia": {
-      "chat_id": "6aa24848-509c-83ec-a7b0-ee313a2c4f4b",
-      "created": "2026-09-10T06:03:58.320Z"
+      "chat_id": "6ab8b728-b008-83ec-b093-73409425bc64",
+      "created": "2026-09-27T06:26:54.832Z"
     },
     "wealthbanks": {
       "chat_id": "6a9e2925-c118-83ec-bd88-56df8cfad384",
       "created": "2026-09-07T03:02:06.085Z"
+    },
+    "iagencyaia-education": {
+      "chat_id": "6ab8beb4-69c4-83ec-9c2b-1899d3716c1e",
+      "base_brand": "iagencyaia",
+      "title": "EDUCATION · Series 2026-09",
+      "project": "iAgencyAIA",
+      "created": "2026-09-27",
+      "set_by": "designer T2301 (bob chat)",
+      "note": "ONE chat for all EDUCATION posters; no new-chat per poster"
     }
   },
   "archived": {

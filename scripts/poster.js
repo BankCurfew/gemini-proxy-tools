@@ -99,8 +99,20 @@ const DESTINATION_BRAND = {
   discord: 'iagencyaia',      // wingman news/content posters
   wealthbanks_net: 'wealthbanks', // wealthbanks.net covers
 };
+// T2301/gpt#20: a series slug (e.g. iagencyaia-education) names its brand via brands.<slug>.base_brand.
+// Every brand lookup goes through this; keying on the raw slug gave a series an EMPTY forbid list.
+function baseBrand(slug) {
+  const key = (slug || '').toLowerCase();
+  const b = cfg.brands && cfg.brands[key];
+  return (b && b.base_brand ? String(b.base_brand) : key).toLowerCase();
+}
 function assertBrandMatch(brand, prompt) {
-  const forbid = BRAND_FORBID[brand] || [];
+  const base = baseBrand(brand);
+  const forbid = BRAND_FORBID[base];
+  // Fail CLOSED: a brand with no forbid list is not "nothing forbidden", it is "unchecked".
+  if (!forbid) {
+    return { ok: false, reason: `no cross-brand forbid list for --brand ${brand} (base "${base}"); set brands.${brand}.base_brand to one of: ${Object.keys(BRAND_FORBID).join(', ')}` };
+  }
   const lower = (prompt || '').toLowerCase();
   for (const tok of forbid) {
     if (lower.includes(tok)) {
@@ -1051,7 +1063,7 @@ async function generate(page, type, brief, taskId) {
   } else {
     const tm = TYPE_MAP[type] || { badge: type.toUpperCase(), name: type, icon: 'star', colorName: 'navy', color: '#1a1a2e' };
     // T599: select brand template by --brand (destination rule)
-    const brandTpl = BRAND_FLAG === 'wealthbanks' ? BRAND_TEMPLATE_WEALTHBANKS : BRAND_TEMPLATE;
+    const brandTpl = baseBrand(BRAND_FLAG) === 'wealthbanks' ? BRAND_TEMPLATE_WEALTHBANKS : BRAND_TEMPLATE;
     prompt = brandTpl
       .replace('{TYPE}', type)
       .replace('{BADGE_CODE}', tm.badge)
@@ -1070,7 +1082,7 @@ async function generate(page, type, brief, taskId) {
       .replace('{CARDS}', '')
       .replace('{COLOR_NOTES}', 'Clean white theme')
       .replace('{LIGHT_NOTES}', 'Light Prestige White theme')
-      .replace('{SOURCE}', BRAND_FLAG === 'wealthbanks' ? 'wealthbanks.net' : 'iAgencyAIA');
+      .replace('{SOURCE}', baseBrand(BRAND_FLAG) === 'wealthbanks' ? 'wealthbanks.net' : 'iAgencyAIA');
   }
 
   for (let attempt = 0; attempt <= cfg.max_retries; attempt++) {
