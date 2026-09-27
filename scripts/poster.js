@@ -503,6 +503,8 @@ async function clickSend(page) {
     const form = document.querySelector('form, div[class*="composer"]');
     if (form) {
       for (const b of form.querySelectorAll('button:not([disabled])')) {
+        // gpt#20: an attachment chip renders as <button aria-label="Remove <file>"> with an svg — never click it
+        if (/^(Remove|Add files)/i.test(b.getAttribute('aria-label') || '')) continue;
         if (b.querySelector('svg') || b.querySelector('path')) { b.click(); return 'svg-fallback'; }
       }
     }
@@ -542,6 +544,9 @@ async function sendPrompt(page, prompt) {
   }
 
   await sleep(500);
+  // gpt#20: with an image attached, Send stays disabled until the upload finishes. Wait for it (max 60s)
+  // instead of falling through to the fallback clicks; unchanged behaviour when nothing is attached.
+  await waitSendEnabled(page, 60000);
 
   const via = await clickSend(page);
   console.log(`[send] via ${via || 'NOTHING — no send control found'}`);
@@ -550,31 +555,207 @@ async function sendPrompt(page, prompt) {
   return true;
 }
 
-// ── T2: Read last assistant message ──
-// T1203: fallback selectors when data-message-author-role is absent from DOM
-async function getLastAssistantMsg(page) {
-  return page.evaluate(() => {
-    // Primary: data-message-author-role (may be removed by ChatGPT)
-    let msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
-    if (!msgs.length) {
-      // T1203 fallback chain:
-      // 1. data-testid conversation turns (odd = assistant in ChatGPT's DOM)
-      // 2. data-message-id containers (role-agnostic)
-      msgs = document.querySelectorAll('[data-testid^="conversation-turn-"]');
-      if (msgs.length) {
-        const last = msgs[msgs.length - 1];
-        return (last.textContent || '').trim().slice(0, 500);
-      }
-      msgs = document.querySelectorAll('[data-message-id]');
-      if (msgs.length) {
-        const last = msgs[msgs.length - 1];
-        return (last.textContent || '').trim().slice(0, 500);
-      }
-      return '';
+async function waitSendEnabled(page, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await page.evaluate(() => {
+      const b = document.querySelector('button[data-testid="send-button"], button[data-testid="composer-send-button"], '
+        + 'button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Send"]');
+      return b ? (b.disabled ? 'disabled' : 'enabled') : 'absent';
+    });
+    if (state !== 'disabled') return state;
+    await sleep(500);
+  }
+  return 'timeout';
+}
+
+// ── gpt#20: attach / reply / log (design-by-conversation, T2300 §4.3a) ──
+const ATTACH_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
+
+// The CDP browser is แบงค์'s Windows Chrome: a Linux path handed to setFileInputFiles gives a chip that says
+// "Upload failed" with no network request, and the message then goes out without the image (probed 27/9).
+// Hand Windows Chrome the \\wsl.localhost\... form of the path.
+async function browserPath(page, f) {
+  const onWindows = await page.evaluate(() => navigator.userAgent.includes('Windows'));
+  if (!onWindows) return f;
+  try { return execSync(`wslpath -w ${JSON.stringify(f)}`, { encoding: 'utf-8' }).trim(); } catch { return f; }
+}
+
+// Success = one 200 from /backend-api/files/process_upload_stream per file (the upload finished server-side).
+// The "Remove <file>" button is NOT a success signal: it renders on a failed chip too.
+async function attachFiles(page, files) {
+  const input = await page.$('form input[type="file"][accept="image/*"]') || await page.$('form input[type="file"]');
+  if (!input) { console.error('🚫 attach: no file input in the composer'); return false; }
+  let processed = 0;
+  const onRes = (r) => { if (r.url().includes('/backend-api/files/process_upload_stream') && r.status() === 200) processed++; };
+  page.on('response', onRes);
+  try {
+    const paths = [];
+    for (const f of files) paths.push(await browserPath(page, f));
+    await input.uploadFile(...paths);
+    const names = files.map((f) => path.basename(f));
+    const deadline = Date.now() + 60000;
+    while (Date.now() < deadline) {
+      const failed = await page.evaluate(() => {
+        const box = document.querySelector('[data-composer-attachments]');
+        return !!box && /Upload failed/i.test(box.innerText || '');
+      });
+      if (failed) { console.error(`🚫 attach: ChatGPT shows "Upload failed" for ${names.join(', ')}`); return false; }
+      if (processed >= files.length) break;
+      await sleep(500);
     }
-    const last = msgs[msgs.length - 1];
-    return (last.textContent || '').trim().slice(0, 500);
+    if (processed < files.length) { console.error(`🚫 attach: ${processed}/${files.length} uploads finished after 60s`); return false; }
+    for (const n of names) console.log(`[attach] uploaded ${n}`);
+    return true;
+  } finally { page.off('response', onRes); }
+}
+
+async function attachCmd(page, args) {
+  const files = [];
+  while (args.length && ATTACH_EXT.has(path.extname(args[0]).toLowerCase()) ) files.push(path.resolve(args.shift()));
+  const message = args.join(' ').trim();
+  if (!files.length) { console.error('Usage: poster.js attach <image> [<image>...] [message] --brand <name>'); process.exitCode = 1; return; }
+  for (const f of files) {
+    if (!fs.existsSync(f)) { console.error(`🚫 attach: file not found: ${f}`); process.exitCode = 1; return; }
+    const mb = fs.statSync(f).size / 1048576;
+    if (mb > 20) { console.error(`🚫 attach: ${path.basename(f)} is ${mb.toFixed(1)} MB (>20 MB)`); process.exitCode = 1; return; }
+  }
+  // T599: the brand guard covers file names and the message, not only prompts
+  const bc = assertBrandMatch(BRAND_FLAG, files.map((f) => path.basename(f)).join(' ') + ' ' + message);
+  if (!bc.ok) { console.error(`\n🚫 ABORT (T599): ${bc.reason}`); process.exitCode = 4; return; }
+  if (DRY_RUN) { console.log(`[dry-run] would attach ${files.map((f) => path.basename(f)).join(', ')}${message ? ' + send message' : ''}`); return; }
+
+  const before = (await readTurns(page)).length;
+  if (!(await attachFiles(page, files))) { process.exitCode = 1; return; }
+  if (!message) {
+    console.log('[attach] staged only — the next `prompt` sends it with the text');
+    return;
+  }
+  if (!(await sendPrompt(page, message))) { process.exitCode = 1; return; }
+  logToFeed(getActiveBrandChatId(), promptHash(message + files.join(',')), 'attach-send');
+  // Read back: a new turn whose user side carries the image(s)
+  const deadline = Date.now() + 20000;
+  let turn = null;
+  while (Date.now() < deadline) {
+    const turns = await readTurns(page);
+    if (turns.length > before) { turn = turns[turns.length - 1]; if (turn.userImages.length >= files.length) break; }
+    await sleep(1000);
+  }
+  if (!turn) { console.error('🚫 attach: sent, but no new turn appeared within 20s'); process.exitCode = 1; return; }
+  console.log(`[attach] sent · turn ${before + 1} · user images on turn: ${turn.userImages.length}/${files.length}`);
+  if (turn.userImages.length < files.length) { console.error('⚠️  attach: the turn shows fewer images than attached — check the chat'); process.exitCode = 1; }
+}
+
+async function replyCmd(page, args) {
+  const wait = args.includes('--wait');
+  const timeoutMs = 180000;
+  const deadline = Date.now() + timeoutMs;
+  let last = null; let stable = 0;
+  for (;;) {
+    const turns = await readTurns(page);
+    const t = [...turns].reverse().find((x) => x.hasAssistant) || null;
+    const streaming = await isStreaming(page);
+    const snapshot = t ? t.assistant + '|' + t.assistantImages.length : '';
+    if (!wait) { last = t; break; }
+    stable = (!streaming && snapshot === (last && last._snap)) ? stable + 1 : 0;
+    last = t && Object.assign(t, { _snap: snapshot });
+    if (stable >= 2) break;
+    if (Date.now() > deadline) { console.error(`⚠️  reply: still changing after ${timeoutMs / 1000}s — printing what is there`); break; }
+    await sleep(2000);
+  }
+  if (!last) { console.error('reply: no assistant message in this chat'); process.exitCode = 1; return; }
+  if (last.assistant) console.log(last.assistant);
+  else console.log('(no text in the last reply)');
+  if (last.assistantImages.length) console.log(`[reply] + ${last.assistantImages.length} generated image(s) — use \`images\` / \`download\``);
+  if (!wait && (await isStreaming(page))) console.error('⚠️  reply: ChatGPT is still writing — rerun with --wait for the full text');
+}
+
+async function logCmd(page, outPath) {
+  if (!outPath) { console.error('Usage: poster.js log <out.md> --brand <name>'); process.exitCode = 1; return; }
+  const turns = await readTurns(page);
+  const url = page.url();
+  const lines = [
+    `# ChatGPT conversation log — ${BRAND_FLAG}`, '',
+    `- chat: ${url}`, `- title: ${await page.title()}`, `- saved: ${new Date().toISOString()}`, `- turns: ${turns.length}`, '',
+  ];
+  const imgLine = (i) => `  - ${i.id}${i.alt ? ` — ${i.alt}` : ''}${i.w ? ` (${i.w}x${i.h})` : ''}`;
+  turns.forEach((t, n) => {
+    lines.push(`## Turn ${n + 1}`, '', '### User', '', t.user || '_(no text)_', '');
+    if (t.userImages.length) lines.push('Attached images:', ...t.userImages.map(imgLine), '');
+    lines.push('### ChatGPT', '', t.hasAssistant ? (t.assistant || '_(no text)_') : '_(no reply yet)_', '');
+    if (t.assistantImages.length) lines.push('Generated images:', ...t.assistantImages.map(imgLine), '');
   });
+  fs.mkdirSync(path.dirname(path.resolve(outPath)), { recursive: true });
+  fs.writeFileSync(outPath, lines.join('\n'));
+  const nImg = turns.reduce((a, t) => a + t.assistantImages.length, 0);
+  const nAtt = turns.reduce((a, t) => a + t.userImages.length, 0);
+  console.log(`[log] ${turns.length} turns · ${nAtt} attached · ${nImg} generated → ${path.resolve(outPath)}`);
+}
+
+// ── T2: Read last assistant message ──
+// gpt#20 (2026-09-27): ChatGPT dropped data-message-author-role. A conversation is now a list of
+// [data-turn-key] blocks, each holding one exchange: the user text in [data-user-message-bubble], an
+// sr-only <h4 data-conversation-role="assistant"> header, then the reply in div[data-markdown-text-style]
+// (probed read-only on the live brand chat). Before this, all three selector paths below returned '' so
+// checkRefusal() in waitForImage() was reading an empty string. readTurns() is the one DOM reader;
+// images are assigned to the user or assistant side by document position relative to that header.
+async function readTurns(page) {
+  return page.evaluate((imgSel) => {
+    const clean = (s) => (s || '').replace(/\n?…\n?Show (more|less)\s*$/, '').trim();
+    const imgInfo = (i) => {
+      const src = i.currentSrc || i.src || '';
+      const m = src.match(/[?&]id=(file[-_][A-Za-z0-9]+)/) || src.match(/(file[-_][A-Za-z0-9]{8,})/);
+      return { id: m ? m[1] : (src.startsWith('blob:') ? 'blob' : src.slice(0, 60)), alt: (i.alt || '').slice(0, 60), w: i.naturalWidth || 0, h: i.naturalHeight || 0 };
+    };
+    const turns = [...document.querySelectorAll('[data-turn-key]')];
+    if (turns.length) {
+      return turns.map((t) => {
+        const u = t.querySelector('[data-user-message-bubble]');
+        const hdr = t.querySelector('[data-conversation-role="assistant"]');
+        const isAfterHdr = (el) => hdr && (hdr.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+        const md = [...t.querySelectorAll('div[data-markdown-text-style]')]
+          .filter((e) => !e.parentElement.closest('div[data-markdown-text-style]'));
+        const imgs = [...t.querySelectorAll('img')].filter((i) => (i.naturalWidth || i.width || 0) >= 64 || i.matches(imgSel));
+        return {
+          key: t.getAttribute('data-turn-key'),
+          user: clean(u ? u.innerText : ''),
+          userImages: imgs.filter((i) => !isAfterHdr(i)).map(imgInfo),
+          hasAssistant: !!hdr,
+          assistant: md.map((e) => e.innerText.trim()).join('\n\n'),
+          assistantImages: imgs.filter((i) => isAfterHdr(i) && i.matches(imgSel)).map(imgInfo),
+        };
+      });
+    }
+    // Legacy DOM: one element per message with data-message-author-role
+    const out = [];
+    for (const m of document.querySelectorAll('[data-message-author-role]')) {
+      const role = m.getAttribute('data-message-author-role');
+      const text = (m.innerText || '').trim();
+      const images = [...m.querySelectorAll('img')].map(imgInfo);
+      if (role === 'user') out.push({ key: null, user: clean(text), userImages: images, hasAssistant: false, assistant: '', assistantImages: [] });
+      else if (role === 'assistant') {
+        if (!out.length || out[out.length - 1].hasAssistant) out.push({ key: null, user: '', userImages: [], hasAssistant: false, assistant: '', assistantImages: [] });
+        const t = out[out.length - 1];
+        t.hasAssistant = true;
+        t.assistant = [t.assistant, text].filter(Boolean).join('\n\n');
+        t.assistantImages.push(...[...m.querySelectorAll(imgSel)].map(imgInfo));
+      }
+    }
+    return out;
+  }, POSTER_IMG_SELECTOR);
+}
+
+async function isStreaming(page) {
+  return page.evaluate(() => !!document.querySelector(
+    'button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label^="Stop"]'));
+}
+
+async function getLastAssistantMsg(page) {
+  const turns = await readTurns(page);
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].hasAssistant) return turns[i].assistant.slice(0, 500);
+  }
+  return '';
 }
 
 function checkRefusal(text) {
@@ -1166,6 +1347,9 @@ Commands:
   download-all [prefix]      Download ALL images in conversation
   images              List all DALL-E images with index numbers
   roll-brand          Force rotate to fresh brand chat
+  attach <img>... [msg]  Upload image(s) into the composer; with msg = send together (read-back checks the turn)
+  reply [--wait]      Print the last ChatGPT reply TEXT (no images); --wait = until it stops writing
+  log <out.md>        Save the whole conversation (user/assistant text + image ids) to a file
 
 Types: atw · mb (MARKET) · holdings · insights · breaking · viral · motivation · aia · education · promo (navy) · fund (= holdings) · raw (custom prompt)
 
@@ -1276,6 +1460,15 @@ Examples:
         dalleImgs.forEach((img, i) => console.log(`  [${i}] ${img.w}x${img.h} ${img.alt || img.src}`));
         break;
       }
+      case 'attach':
+        await attachCmd(page, [...args]);
+        break;
+      case 'reply':
+        await replyCmd(page, process.argv.slice(3));
+        break;
+      case 'log':
+        await logCmd(page, args[0]);
+        break;
       case 'roll-brand': case 'rotate':
         await rollBrandChat(page);
         break;
