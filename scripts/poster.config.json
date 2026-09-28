@@ -72,6 +72,15 @@
       "created": "2026-09-27",
       "set_by": "designer T2301 (bob chats)",
       "note": "ONE chat for all BREAKING posters; no new-chat per poster"
+    },
+    "iagencyaia-weekly": {
+      "chat_id": "6ab9d37e-e4ac-83ec-906a-1f9bc415050a",
+      "base_brand": "iagencyaia",
+      "title": "WEEKLY · Series 2026-09",
+      "project": "iAgencyAIA",
+      "created": "2026-09-28",
+      "set_by": "designer T2368 (bob ok 09:38; created with BoB ψ/lab/t2301/create-series.mjs)",
+      "note": "ONE chat for all weekly-summary posters (STANDARD navy badge); no new-chat per poster"
     }
   },
   "archived": {
