@@ -557,6 +557,12 @@ async function fillComposer(page, text) {
   // Chrome restarts leave the ChatGPT tabs hidden (visibilityState=hidden); input and send misbehave there.
   await page.bringToFront().catch(() => {});
   await installComposerFinder(page);
+  // T2398 S2: a chat can open with an unsent draft already in the composer (designer's S2 held 2382 chars), and the
+  // editor clear below left it there: draft + paste = 2x text. So clear first and READ BACK EMPTY; if the editor clear
+  // did not take, clear with real keys; if text is still there, refuse (never paste on top of a draft).
+  const left = await clearComposer(page);
+  if (left === null) return { ok: false, kind: null, reason: 'no visible composer' };
+  if (left > 0) return { ok: false, kind: null, reason: `composer not cleared: ${left} chars of an old draft still there` };
   const kind = await page.evaluate((t) => {
     const el = window.__posterComposer();
     if (!el) return null;
@@ -567,9 +573,6 @@ async function fillComposer(page, text) {
       el.dispatchEvent(new Event('input', { bubbles: true }));
       return 'textarea';
     }
-    // ProseMirror: clear through the editor (select all + delete), never textContent='' which desyncs its state.
-    document.execCommand('selectAll', false, null);
-    document.execCommand('delete', false, null);
     const dt = new DataTransfer();
     dt.setData('text/plain', t);
     el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
@@ -586,6 +589,37 @@ async function fillComposer(page, text) {
   const head = want.slice(0, 60);
   const ok = !!got && got.startsWith(head) && Math.abs(got.length - want.length) <= Math.max(10, want.length * 0.05);
   return ok ? { ok, kind } : { ok, kind, reason: `composer read-back mismatch: want ${want.length} chars "${head.slice(0, 30)}…", got ${got ? got.length : 0} chars "${(got || '').slice(0, 30)}…"` };
+}
+
+// Empty the composer and return how many chars are left (0 = empty, null = no composer).
+async function clearComposer(page) {
+  const len = () => page.evaluate(() => { const t = window.__posterComposerText(); return t === null ? null : t.length; });
+  let left = await len();
+  if (!left) return left;
+  await page.evaluate(() => {
+    const el = window.__posterComposer();
+    el.focus();
+    if (el.tagName === 'TEXTAREA') {
+      const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      if (set) set.call(el, ''); else el.value = '';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return;
+    }
+    // ProseMirror: clear through the editor (select all + delete), never textContent='' which desyncs its state.
+    document.execCommand('selectAll', false, null);
+    document.execCommand('delete', false, null);
+  });
+  await sleep(200);
+  left = await len();
+  if (!left) return left;
+  const handle = await page.evaluateHandle(() => window.__posterComposer());
+  await handle.asElement()?.click().catch(() => {});
+  await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control');
+  await page.keyboard.press('Backspace');
+  await sleep(300);
+  left = await len();
+  console.error(`[composer] editor clear left an old draft; cleared with keys, ${left} chars left`);
+  return left;
 }
 
 // Fill → read back → send → prove a NEW user turn appeared (or the chat URL changed, for a brand-new chat).
