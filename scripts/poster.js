@@ -535,7 +535,16 @@ window.__posterTurns = () => Math.max(
   document.querySelectorAll('[data-user-message-bubble="true"]').length,
   document.querySelectorAll('[data-content-search-unit-key$=":user"]').length,
   document.querySelectorAll('[data-message-author-role="user"]').length,
-  document.querySelectorAll('[data-turn="user"]').length);`;
+  document.querySelectorAll('[data-turn="user"]').length);
+// T2398: busy = a stop button or a 'still writing' notice. NOT 'Loading chats' / 'Loading older messages…' — those
+// stay on screen indefinitely (sidebar + lazy history), so waiting on them never ends (probe 30/9).
+// T2398: text of the newest user message — confirms a send even when older turns are unmounted (count stays flat).
+window.__posterLastUser = () => {
+  const b = document.querySelectorAll('[data-user-message-bubble="true"]');
+  return b.length ? (b[b.length - 1].innerText || '').replace(/\\s+/g, ' ').trim() : '';
+};
+window.__posterBusy = () => !!document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop"]')
+  || [...document.querySelectorAll('[role=alert], [role=status]')].some((e) => /still (writing|generating)/i.test(e.innerText || ''));`;
 
 async function installComposerFinder(page) {
   await page.evaluate(COMPOSER_FINDER_SRC);
@@ -580,29 +589,66 @@ async function fillComposer(page, text) {
 }
 
 // Fill → read back → send → prove a NEW user turn appeared (or the chat URL changed, for a brand-new chat).
-async function sendAndConfirm(page, text, { label = 'send', timeoutMs = 20000, waitEnabledMs = 60000 } = {}) {
+async function sendAndConfirm(page, text, opts = {}) {
+  const label = opts.label || 'send';
+  const first = await sendOnce(page, text, opts);
+  if (first === 'confirmed') return true;
+  if (first === 'no-composer-text') return false; // read-back refused: nothing was sent, retrying would not help
+  // T2398: a tab can be stuck in a local "ChatGPT is still writing" state (send refused, no new turn). Reload, wait
+  // until the chat is ready, and only resend if our message is NOT already the newest user turn (never double-send).
+  console.error(`[${label}] retrying once after reload (${first})`);
+  await page.reload({ waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
+  await waitChatReady(page, 45000);
+  const head = normText(text).slice(0, 60);
+  await installComposerFinder(page);
+  const last = await page.evaluate(() => window.__posterLastUser()).catch(() => '');
+  if (last.startsWith(head)) { console.log(`[${label}] confirmed after reload: newest user turn is this message (no resend)`); return true; }
+  const second = await sendOnce(page, text, opts);
+  if (second === 'confirmed') return true;
+  console.error(`[${label}] NOT CONFIRMED after reload + resend (${second}) — chat may be locked; open it in Chrome to check`);
+  return false;
+}
+
+async function waitChatReady(page, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await installComposerFinder(page).catch(() => {});
+    const ready = await page.evaluate(() => !!window.__posterComposer() && !window.__posterBusy()).catch(() => false);
+    if (ready) return true;
+    await sleep(1000);
+  }
+  return false;
+}
+
+// One attempt. Returns 'confirmed' | 'no-composer-text' | 'send-disabled' | 'no-send-control' | 'no-new-turn'.
+async function sendOnce(page, text, { label = 'send', timeoutMs = 20000, waitEnabledMs = 60000 } = {}) {
   await installComposerFinder(page);
   const before = await page.evaluate(() => window.__posterTurns());
+  const lastBefore = await page.evaluate(() => window.__posterLastUser());
+  const head = normText(text).slice(0, 60);
   const urlBefore = page.url();
   const fill = await fillComposer(page, text);
-  if (!fill.ok) { console.error(`[${label}] NOT SENT — ${fill.reason}`); return false; }
+  if (!fill.ok) { console.error(`[${label}] NOT SENT — ${fill.reason}`); return 'no-composer-text'; }
   // gpt#20: with an image attached, Send stays disabled until the upload finishes.
-  await waitSendEnabled(page, waitEnabledMs);
+  const enabled = await waitSendEnabled(page, waitEnabledMs);
+  if (enabled === 'timeout') { console.error(`[${label}] send button stayed disabled ${waitEnabledMs / 1000}s`); return 'send-disabled'; }
   const via = await clickSend(page);
   console.log(`[${label}] composer=${fill.kind} send via ${via || 'NOTHING — no send control found'}`);
-  if (!via) return false;
+  if (!via) return 'no-send-control';
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await sleep(500);
     await installComposerFinder(page).catch(() => {});
     const now = await page.evaluate(() => window.__posterTurns()).catch(() => before);
-    if (now > before || page.url() !== urlBefore) {
-      console.log(`[${label}] confirmed: new turn (${before} → ${now})${page.url() !== urlBefore ? ' + chat url changed' : ''}`);
-      return true;
+    const last = await page.evaluate(() => window.__posterLastUser()).catch(() => lastBefore);
+    const byText = last.startsWith(head) && !lastBefore.startsWith(head);
+    if (now > before || page.url() !== urlBefore || byText) {
+      console.log(`[${label}] confirmed: ${now > before ? `new turn (${before} → ${now})` : byText ? 'newest user turn is this message' : 'chat url changed'}`);
+      return 'confirmed';
     }
   }
-  console.error(`[${label}] NOT CONFIRMED — no new turn within ${timeoutMs / 1000}s after send (turns stayed ${before})`);
-  return false;
+  console.error(`[${label}] no new turn within ${timeoutMs / 1000}s after send (turns stayed ${before})`);
+  return 'no-new-turn';
 }
 
 async function sendPrompt(page, prompt) {
