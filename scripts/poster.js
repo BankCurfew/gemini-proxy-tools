@@ -387,26 +387,11 @@ async function rollBrandChat(page) {
   const primer = seedForBrand[brandSlug] || seedForBrand.iagencyaia;
   await sleep(1000);
 
-  const typed = await page.evaluate((text) => {
-    const el = document.querySelector('#prompt-textarea, textarea[data-id], div[contenteditable="true"]');
-    if (!el) return false;
-    if (el.tagName === 'TEXTAREA') {
-      el.value = text;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-    } else {
-      el.focus();
-      el.textContent = '';
-      document.execCommand('insertText', false, text);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-    return true;
-  }, primer);
-
-  if (typed) {
-    await sleep(300);
-    const via = await clickSend(page);
-    console.log(`[primer] send via ${via || 'NOTHING — no send control found'}`);
+  // T2397: shared visible-composer send with read-back + new-turn confirmation.
+  if (await sendAndConfirm(page, primer, { label: 'primer' })) {
     await sleep(5000); // Wait for ack
+  } else {
+    console.error('[primer] brand seed did not land — the rotated chat has no primer');
   }
 
   console.log('Brand chat rotated + re-seeded.');
@@ -506,13 +491,17 @@ function qaGate(filePath) {
 // waited 45s for a /c/<id> that could not appear. One helper for every send site; returns the path that clicked
 // (or null) so callers can fail loudly instead of waiting on a URL.
 async function clickSend(page) {
+  await installComposerFinder(page);
   return page.evaluate(() => {
-    const known = document.querySelector('button[data-testid="send-button"], button[data-testid="composer-send-button"], '
+    // T2397: search inside the composer's own form — a project page carries other forms/textareas.
+    const composer = window.__posterComposer();
+    const scope = (composer && composer.closest('form')) || document;
+    const known = scope.querySelector('button[data-testid="send-button"], button[data-testid="composer-send-button"], '
       + 'button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Send"]');
     if (known && !known.disabled) { known.click(); return 'send-button'; }
-    const submit = document.querySelector('form button[type="submit"]:not([disabled])');
+    const submit = scope.querySelector('button[type="submit"]:not([disabled])');
     if (submit) { submit.click(); return 'form-submit'; }
-    const form = document.querySelector('form, div[class*="composer"]');
+    const form = composer ? composer.closest('form, div[class*="composer"]') : null;
     if (form) {
       for (const b of form.querySelectorAll('button:not([disabled])')) {
         // gpt#20: an attachment chip renders as <button aria-label="Remove <file>"> with an svg — never click it
@@ -520,49 +509,108 @@ async function clickSend(page) {
         if (b.querySelector('svg') || b.querySelector('path')) { b.click(); return 'svg-fallback'; }
       }
     }
-    const el = document.querySelector('#prompt-textarea, div[contenteditable="true"]');
-    if (el) { el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true })); return 'enter-key'; }
+    if (composer) { composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true })); return 'enter-key'; }
     return null;
   });
 }
 
-async function sendPrompt(page, prompt) {
-  const typed = await page.evaluate((text) => {
-    const el = document.querySelector('#prompt-textarea, textarea[data-id], div[contenteditable="true"]');
-    if (!el) return false;
-    if (el.tagName === 'TEXTAREA') {
-      el.value = text;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-    } else {
-      // ProseMirror contentEditable (project chats) — ClipboardEvent paste
-      el.focus();
-      el.textContent = '';
-      const dt = new DataTransfer();
-      dt.setData('text/plain', text);
-      el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
-      // Fallback: execCommand if paste didn't populate
-      if (!el.textContent || el.textContent.trim().length < 5) {
-        el.textContent = '';
-        document.execCommand('insertText', false, text);
-      }
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-    return true;
-  }, prompt);
+// T2397 (30/9): '#prompt-textarea' is gone — the composer is div.ProseMirror[contenteditable] with no id — and a
+// project page also holds 3 hidden <textarea>s. The old selector list took the first match in document order, so the
+// prompt could go into a hidden textarea and the send never landed. Only a VISIBLE element counts, ProseMirror first.
+const COMPOSER_FINDER_SRC = `window.__posterComposer = () => {
+  const visible = (e) => e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+  const sels = ['div.ProseMirror[contenteditable="true"]', '#prompt-textarea', 'div[contenteditable="true"]',
+                'textarea[data-id]', 'form textarea'];
+  for (const s of sels) for (const e of document.querySelectorAll(s)) if (visible(e)) return e;
+  return null;
+};
+window.__posterComposerText = () => {
+  const el = window.__posterComposer();
+  if (!el) return null;
+  return (el.tagName === 'TEXTAREA' ? el.value : el.innerText || '').replace(/\\s+/g, ' ').trim();
+};
+// USER turns only. 30/9 probe: none of data-message-author-role / conversation-turn-* / data-message-id / article exist on
+// today's DOM; a sent message renders as [data-user-message-bubble=true] inside [data-content-search-unit-key$=":user"].
+window.__posterTurns = () => Math.max(
+  document.querySelectorAll('[data-user-message-bubble="true"]').length,
+  document.querySelectorAll('[data-content-search-unit-key$=":user"]').length,
+  document.querySelectorAll('[data-message-author-role="user"]').length,
+  document.querySelectorAll('[data-turn="user"]').length);`;
 
-  if (!typed) {
-    console.error('ERROR: ChatGPT input box not found');
+async function installComposerFinder(page) {
+  await page.evaluate(COMPOSER_FINDER_SRC);
+}
+
+const normText = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+
+// Type into the visible composer and READ IT BACK. Returns { ok, kind, reason }. A mismatch is a failure, never a send.
+async function fillComposer(page, text) {
+  // Chrome restarts leave the ChatGPT tabs hidden (visibilityState=hidden); input and send misbehave there.
+  await page.bringToFront().catch(() => {});
+  await installComposerFinder(page);
+  const kind = await page.evaluate((t) => {
+    const el = window.__posterComposer();
+    if (!el) return null;
+    el.focus();
+    if (el.tagName === 'TEXTAREA') {
+      const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      if (set) set.call(el, t); else el.value = t;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return 'textarea';
+    }
+    // ProseMirror: clear through the editor (select all + delete), never textContent='' which desyncs its state.
+    document.execCommand('selectAll', false, null);
+    document.execCommand('delete', false, null);
+    const dt = new DataTransfer();
+    dt.setData('text/plain', t);
+    el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    if (normText(el.innerText).length < 5) document.execCommand('insertText', false, t);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    return el.classList.contains('ProseMirror') ? 'prosemirror' : 'contenteditable';
+
+    function normText(s) { return String(s || '').replace(/\s+/g, ' ').trim(); }
+  }, text);
+  if (!kind) return { ok: false, kind: null, reason: 'no visible composer' };
+  await sleep(400);
+  const got = await page.evaluate(() => window.__posterComposerText());
+  const want = normText(text);
+  const head = want.slice(0, 60);
+  const ok = !!got && got.startsWith(head) && Math.abs(got.length - want.length) <= Math.max(10, want.length * 0.05);
+  return ok ? { ok, kind } : { ok, kind, reason: `composer read-back mismatch: want ${want.length} chars "${head.slice(0, 30)}…", got ${got ? got.length : 0} chars "${(got || '').slice(0, 30)}…"` };
+}
+
+// Fill → read back → send → prove a NEW user turn appeared (or the chat URL changed, for a brand-new chat).
+async function sendAndConfirm(page, text, { label = 'send', timeoutMs = 20000, waitEnabledMs = 60000 } = {}) {
+  await installComposerFinder(page);
+  const before = await page.evaluate(() => window.__posterTurns());
+  const urlBefore = page.url();
+  const fill = await fillComposer(page, text);
+  if (!fill.ok) { console.error(`[${label}] NOT SENT — ${fill.reason}`); return false; }
+  // gpt#20: with an image attached, Send stays disabled until the upload finishes.
+  await waitSendEnabled(page, waitEnabledMs);
+  const via = await clickSend(page);
+  console.log(`[${label}] composer=${fill.kind} send via ${via || 'NOTHING — no send control found'}`);
+  if (!via) return false;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await sleep(500);
+    await installComposerFinder(page).catch(() => {});
+    const now = await page.evaluate(() => window.__posterTurns()).catch(() => before);
+    if (now > before || page.url() !== urlBefore) {
+      console.log(`[${label}] confirmed: new turn (${before} → ${now})${page.url() !== urlBefore ? ' + chat url changed' : ''}`);
+      return true;
+    }
+  }
+  console.error(`[${label}] NOT CONFIRMED — no new turn within ${timeoutMs / 1000}s after send (turns stayed ${before})`);
+  return false;
+}
+
+async function sendPrompt(page, prompt) {
+  // T2397: visible composer only, read back before send, and a new turn must appear after it.
+  if (!(await sendAndConfirm(page, prompt, { label: 'send' }))) {
+    console.error('ERROR: prompt did not land in ChatGPT (see line above)');
     return false;
   }
-
-  await sleep(500);
-  // gpt#20: with an image attached, Send stays disabled until the upload finishes. Wait for it (max 60s)
-  // instead of falling through to the fallback clicks; unchanged behaviour when nothing is attached.
-  await waitSendEnabled(page, 60000);
-
-  const via = await clickSend(page);
-  console.log(`[send] via ${via || 'NOTHING — no send control found'}`);
-
   console.log('Prompt sent. Waiting for DALL-E generation...');
   return true;
 }
@@ -1233,34 +1281,9 @@ async function newChat(page, rawBrandName) {
   const seed = `You are a brand poster designer for ${brandName}. Respond only: "Ready for ${brandName} posters."`;
   console.log('[new-chat] Sending seed message...');
 
-  const sent = await newPage.evaluate((text) => {
-    const el = document.querySelector('#prompt-textarea') || document.querySelector('[contenteditable="true"]');
-    if (!el) return false;
-    el.focus();
-    if (el.tagName === 'TEXTAREA') {
-      const nativeSet = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
-      if (nativeSet) { nativeSet.call(el, text); el.dispatchEvent(new Event('input', { bubbles: true })); }
-    } else {
-      el.textContent = text;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-    return true;
-  }, seed);
-
-  if (!sent) {
-    console.error('[new-chat] FAILED: Could not find prompt textarea');
-    await newPage.close();
-    process.exitCode = 1;
-    return;
-  }
-
-  await sleep(1000);
-
-  // Click send button (T2167: shared helper; a miss fails now instead of after a 45s URL wait)
-  const via = await clickSend(newPage);
-  console.log(`[new-chat] seed sent via ${via || 'NOTHING'}`);
-  if (!via) {
-    console.error('[new-chat] FAILED: no send control found in the composer (ChatGPT DOM changed?) — seed NOT sent');
+  // T2397: shared visible-composer send; the chat URL changing to /c/<id> counts as the new turn here.
+  if (!(await sendAndConfirm(newPage, seed, { label: 'new-chat', timeoutMs: 45000 }))) {
+    console.error('[new-chat] FAILED: seed did not land (see line above)');
     await newPage.close();
     process.exitCode = 1;
     return;
