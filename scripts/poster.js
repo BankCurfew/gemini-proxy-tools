@@ -1355,10 +1355,19 @@ async function newChat(page, rawBrandName) {
   const brandName = rawBrandName.toLowerCase();
   console.log(`[new-chat] Creating new ChatGPT chat for brand: ${brandName}`);
 
-  // Open a NEW tab — bypass connect() which reuses existing ChatGPT tab
-  const browser = page.browser();
-  const newPage = await browser.newPage();
-  _createdPages.push(newPage);
+  // T2406 (แบงค์ '1 tab'): POSTER_ONE_TAB=1 reuses the connected ChatGPT tab (same-tab navigation) instead of
+  // opening a second one. Default (flag unset) keeps the old new-tab path until the 3/3 acceptance switch-over.
+  const oneTab = process.env.POSTER_ONE_TAB === '1';
+  let newPage;
+  if (oneTab) {
+    newPage = page;
+    console.log('[new-chat] POSTER_ONE_TAB=1: reusing the existing ChatGPT tab (no new tab)');
+  } else {
+    // Open a NEW tab — bypass connect() which reuses existing ChatGPT tab
+    newPage = await page.browser().newPage();
+    _createdPages.push(newPage);
+  }
+  const dropPage = async () => { if (!oneTab) await newPage.close(); };   // never close the one shared tab
 
   // Navigate to chatgpt.com home (fresh chat state)
   await newPage.goto('https://chatgpt.com/', { waitUntil: 'networkidle2', timeout: 30000 });
@@ -1390,7 +1399,7 @@ async function newChat(page, rawBrandName) {
   // T2397: shared visible-composer send; the chat URL changing to /c/<id> counts as the new turn here.
   if (!(await sendAndConfirm(newPage, seed, { label: 'new-chat', timeoutMs: 45000 }))) {
     console.error('[new-chat] FAILED: seed did not land (see line above)');
-    await newPage.close();
+    await dropPage();
     process.exitCode = 1;
     return;
   }
@@ -1418,7 +1427,7 @@ async function newChat(page, rawBrandName) {
     console.error('[new-chat] FAILED: Could not capture NEW chat ID from URL after 45s');
     console.error('[new-chat] Current URL:', newPage.url());
     console.error('[new-chat] Existing chat IDs:', existingChatIds.map(id => id.slice(0, 8)).join(', '));
-    await newPage.close();
+    await dropPage();
     process.exitCode = 1;
     return;
   }
@@ -1456,7 +1465,7 @@ async function newChat(page, rawBrandName) {
   console.log(`\n✅ Brand "${brandName}" ready. Use: node poster.js generate <type> <brief> --brand ${brandName}`);
 
   // The tab is closed by cleanupCreatedPages() on exit; connect() opens the chat by id next run (T2197).
-  console.log(`[new-chat] Chat saved server-side at: ${newPage.url()} (this tab closes on exit)`);
+  console.log(`[new-chat] Chat saved server-side at: ${newPage.url()} (${oneTab ? 'same tab, stays open' : 'this tab closes on exit'})`);
 }
 
 function stripFlags(argv) {
