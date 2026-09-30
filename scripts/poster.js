@@ -543,6 +543,13 @@ window.__posterLastUser = () => {
   const b = document.querySelectorAll('[data-user-message-bubble="true"]');
   return b.length ? (b[b.length - 1].innerText || '').replace(/\\s+/g, ' ').trim() : '';
 };
+// T2398 atw: id of the newest user message. Text is NOT identity: locked-template prompts share a long identical head,
+// so last night's turn matched the first 60 chars and a dropped send read as 'confirmed (no resend)'.
+window.__posterLastUserId = () => {
+  const b = document.querySelectorAll('[data-user-message-bubble="true"]');
+  const holder = b.length ? b[b.length - 1].closest('[data-chatgpt-search-message-ids], [data-message-id]') : null;
+  return holder ? (holder.getAttribute('data-chatgpt-search-message-ids') || holder.getAttribute('data-message-id') || '') : '';
+};
 window.__posterBusy = () => !!document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop"]')
   || [...document.querySelectorAll('[role=alert], [role=status]')].some((e) => /still (writing|generating)/i.test(e.innerText || ''));`;
 
@@ -551,6 +558,13 @@ async function installComposerFinder(page) {
 }
 
 const normText = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+// Whole-text match (a long bubble may render slightly short, so allow a >=90% prefix) — never a head-only match.
+const sameText = (shown, want) => {
+  const a = normText(shown), b = normText(want);
+  return !!a && (a === b || (b.startsWith(a) && a.length >= b.length * 0.9));
+};
+const lastUser = (page) => page.evaluate(() => ({ id: window.__posterLastUserId(), text: window.__posterLastUser() }))
+  .catch(() => ({ id: '', text: '' }));
 
 // Type into the visible composer and READ IT BACK. Returns { ok, kind, reason }. A mismatch is a failure, never a send.
 async function fillComposer(page, text) {
@@ -625,6 +639,8 @@ async function clearComposer(page) {
 // Fill → read back → send → prove a NEW user turn appeared (or the chat URL changed, for a brand-new chat).
 async function sendAndConfirm(page, text, opts = {}) {
   const label = opts.label || 'send';
+  await installComposerFinder(page);
+  const before = await lastUser(page); // newest user message BEFORE any attempt: the reload check must see a NEW one
   const first = await sendOnce(page, text, opts);
   if (first === 'confirmed') return true;
   if (first === 'no-composer-text') return false; // read-back refused: nothing was sent, retrying would not help
@@ -633,10 +649,13 @@ async function sendAndConfirm(page, text, opts = {}) {
   console.error(`[${label}] retrying once after reload (${first})`);
   await page.reload({ waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
   await waitChatReady(page, 45000);
-  const head = normText(text).slice(0, 60);
   await installComposerFinder(page);
-  const last = await page.evaluate(() => window.__posterLastUser()).catch(() => '');
-  if (last.startsWith(head)) { console.log(`[${label}] confirmed after reload: newest user turn is this message (no resend)`); return true; }
+  const now = await lastUser(page);
+  if (now.id && now.id !== before.id && sameText(now.text, text)) {
+    console.log(`[${label}] confirmed after reload: newest user message ${now.id.slice(0, 8)} is new since the send and is this text (no resend)`);
+    return true;
+  }
+  console.error(`[${label}] after reload: not proven landed (newest id ${now.id ? (now.id === before.id ? 'unchanged' : 'new but other text') : 'unreadable'}) -> resend`);
   const second = await sendOnce(page, text, opts);
   if (second === 'confirmed') return true;
   console.error(`[${label}] NOT CONFIRMED after reload + resend (${second}) — chat may be locked; open it in Chrome to check`);
@@ -658,8 +677,7 @@ async function waitChatReady(page, timeoutMs) {
 async function sendOnce(page, text, { label = 'send', timeoutMs = 20000, waitEnabledMs = 60000 } = {}) {
   await installComposerFinder(page);
   const before = await page.evaluate(() => window.__posterTurns());
-  const lastBefore = await page.evaluate(() => window.__posterLastUser());
-  const head = normText(text).slice(0, 60);
+  const lastBefore = await lastUser(page);
   const urlBefore = page.url();
   const fill = await fillComposer(page, text);
   if (!fill.ok) { console.error(`[${label}] NOT SENT — ${fill.reason}`); return 'no-composer-text'; }
@@ -674,8 +692,8 @@ async function sendOnce(page, text, { label = 'send', timeoutMs = 20000, waitEna
     await sleep(500);
     await installComposerFinder(page).catch(() => {});
     const now = await page.evaluate(() => window.__posterTurns()).catch(() => before);
-    const last = await page.evaluate(() => window.__posterLastUser()).catch(() => lastBefore);
-    const byText = last.startsWith(head) && !lastBefore.startsWith(head);
+    const last = await lastUser(page);
+    const byText = !!last.id && last.id !== lastBefore.id && sameText(last.text, text);
     if (now > before || page.url() !== urlBefore || byText) {
       console.log(`[${label}] confirmed: ${now > before ? `new turn (${before} → ${now})` : byText ? 'newest user turn is this message' : 'chat url changed'}`);
       return 'confirmed';
