@@ -558,10 +558,18 @@ async function installComposerFinder(page) {
 }
 
 const normText = (s) => String(s || '').replace(/\s+/g, ' ').trim();
-// Whole-text match (a long bubble may render slightly short, so allow a >=90% prefix) — never a head-only match.
+// T2398 S1: ChatGPT clips a long user bubble to ~1.7k chars and appends '… Show more', so a sent prompt read as
+// "not landed" and got resent (3x on S1, 30/9). Identity is the NEW message id (checked by callers); the text only has
+// to be this prompt's visible start: strip the clip marker, then the shown part must be a prefix of the prompt.
+const CLIP_RE = /\s*(?:…|\.\.\.)?\s*(?:Show more|แสดงเพิ่มเติม|ดูเพิ่มเติม)\s*$/i;
 const sameText = (shown, want) => {
-  const a = normText(shown), b = normText(want);
-  return !!a && (a === b || (b.startsWith(a) && a.length >= b.length * 0.9));
+  const raw = normText(shown), b = normText(want);
+  const clipped = CLIP_RE.test(raw);
+  const a = normText(raw.replace(CLIP_RE, '')).replace(/…$/, '').trim();
+  if (!a) return false;
+  if (a === b) return true;
+  if (!b.startsWith(a)) return false;
+  return clipped ? a.length >= Math.min(200, b.length) : a.length >= b.length * 0.9;
 };
 const lastUser = (page) => page.evaluate(() => ({ id: window.__posterLastUserId(), text: window.__posterLastUser() }))
   .catch(() => ({ id: '', text: '' }));
