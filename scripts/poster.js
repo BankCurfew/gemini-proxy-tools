@@ -1255,6 +1255,9 @@ async function generate(page, type, brief, taskId) {
 
     const beforeCount = (await listImages(page)).length;
     console.log(`Generating ${type} poster (attempt ${attempt + 1}, baseline: ${beforeCount} images)...`);
+    // chat id first: the T599 abort below logs it (it used to be declared after, so every block crashed with a TDZ
+    // ReferenceError, the BLOCKED feed line was never written and exit 4 became 1 — T2406 30/9)
+    const chatId = page.url().match(/\/c\/([a-f0-9-]+)/)?.[1] || 'unknown';
     // T599 SAFEGUARD: cross-brand prompt assertion — ABORT if prompt carries another brand's tokens.
     const brandCheck = assertBrandMatch(BRAND_FLAG, prompt);
     if (!brandCheck.ok) {
@@ -1265,7 +1268,6 @@ async function generate(page, type, brief, taskId) {
       return null;
     }
     // SAFEGUARD: log chat_id + prompt_hash before every send
-    const chatId = page.url().match(/\/c\/([a-f0-9-]+)/)?.[1] || 'unknown';
     logToFeed(chatId, promptHash(prompt), `gen:${type}`);
     const sent = await sendPrompt(page, prompt);
     if (!sent) return null;
