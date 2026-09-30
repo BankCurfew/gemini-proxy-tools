@@ -72,6 +72,8 @@ const currentCmd = process.argv[2];
 let BRAND_CHAT_URL;
 if (BRAND_EXEMPT_CMDS.has(currentCmd) || !currentCmd) {
   BRAND_CHAT_URL = cfg.chatgpt_url;
+} else if (currentCmd === 'new-chat') {           // T2406: new-chat CREATES the brand, so it may not exist yet (--brand still required below)
+  BRAND_CHAT_URL = cfg.chatgpt_url;
 } else {
   BRAND_CHAT_URL = `${cfg.chatgpt_url}/c/${getActiveBrandChatId()}`;
 }
@@ -334,6 +336,13 @@ async function connect() {
     page = chatgptPage;
   }
 
+  return { browser, page };
+}
+
+async function connectAnyChatgptTab() {
+  const browser = await puppeteer.connect({ browserURL: cfg.cdp_url, defaultViewport: null, protocolTimeout: cfg.cdp_protocol_timeout });
+  const page = (await browser.pages()).find(p => p.url().includes('chatgpt.com'));
+  if (!page) throw new Error(`🚫 CONNECT FAILED: No ChatGPT tab open in browser. Open ONE https://chatgpt.com/ tab, then retry.`);
   return { browser, page };
 }
 
@@ -1561,7 +1570,9 @@ Examples:
     }
   }
 
-  const { browser, page } = await connect();
+  // T2406: new-chat creates the brand, so it cannot resolve the brand's chat first (connect() exits for an unknown brand).
+  // It attaches to the one existing ChatGPT tab instead; newChat() navigates that tab to a fresh chat.
+  const { browser, page } = cmd === 'new-chat' ? await connectAnyChatgptTab() : await connect();
 
   try {
     switch (cmd) {
