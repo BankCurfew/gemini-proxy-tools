@@ -54,6 +54,7 @@ async function shot(pg, id, step) {
 async function prepare(cmd) {
   if (['PREPARING', 'READY', 'SHARING'].includes(state.phase))
     return { ok: false, error: `busy: job ${state.id} is ${state.phase} — share or abort it first` };
+  if (cmd.action === 'post_story') return prepareStory(cmd);
   const reel = cmd.action === 'post_reel';
   const files = reel ? [cmd.file] : cmd.files;
   const missing = files.filter(f => !fs.existsSync(winToWsl(f)));
@@ -66,12 +67,12 @@ async function prepare(cmd) {
   const b = await web.connect(); let pg;
   const fail = async (step, why) => {
     const s = pg ? await shot(pg, cmd.id, `fail-${step}`) : null;
-    if (pg) await pg.close().catch(() => {});
+    await web.closeOwn(pg, cmd.expectUser);
     await setState({ phase: 'FAILED', ...job, step, why, screenshot: s });
     return { ok: false, error: `${step}: ${why}`, screenshot: s };
   };
   try {
-    pg = await web.openOwnTab(b);
+    pg = await web.openOwnTab(b, cmd.expectUser);
     const who = await web.whoami(pg);
     if (!who || who.toLowerCase() !== cmd.expectUser.toLowerCase()) return await fail('account', `logged in as ${who || 'unknown'}, expected ${cmd.expectUser} — nothing posted`);
     let e = await web.openCreatePost(pg); if (e) return await fail('create', e);
@@ -122,11 +123,12 @@ async function share(cmd) {
     if (!pg) { await setState({ ...job, phase: 'FAILED', why: 'prepared tab is gone' }); return { ok: false, error: 'prepared tab is gone — prepare again' }; }
     await setState({ ...job, phase: 'SHARING' });
     const since = Math.floor(Date.now() / 1000);
+    if (job.action === 'post_story') return await shareStoryJob(pg, job, since);
     const sh = await web.clickShare(pg);
-    if (!sh.ok) { const s = await shot(pg, job.id, 'share-fail'); await pg.close().catch(() => {}); await setState({ ...job, phase: 'FAILED', why: sh.why, screenshot: s }); return { ok: false, error: sh.why, screenshot: s }; }
+    if (!sh.ok) { const s = await shot(pg, job.id, 'share-fail'); await web.closeOwn(pg, job.expectUser); await setState({ ...job, phase: 'FAILED', why: sh.why, screenshot: s }); return { ok: false, error: sh.why, screenshot: s }; }
     await shot(pg, job.id, 'shared');
     const rb = await readbackAndFix(pg, job, since);
-    await pg.close().catch(() => {});
+    await web.closeOwn(pg, job.expectUser);
     const phase = rb.readback.state;
     await setState({ ...job, phase, ...rb, permalink: rb.info?.permalink });
     log({ action: 'share', id: job.id, user: job.expectUser, phase, permalink: rb.info?.permalink, code: rb.info?.code, defects: rb.readback.defects });
@@ -136,7 +138,7 @@ async function share(cmd) {
 
 async function abort() {
   const b = await web.connect();
-  try { const pg = await web.findOwnTab(b); if (pg) await pg.close(); } finally { b.disconnect(); }
+  try { const pg = await web.findOwnTab(b); if (pg) await web.closeOwn(pg, state.expectUser); } finally { b.disconnect(); }
   const was = state.phase;
   await setState({ phase: 'ABORTED', id: state.id, was });
   return { ok: true, state: 'ABORTED', was };
@@ -146,7 +148,7 @@ async function editCaptionCmd(cmd) {
   if (['PREPARING', 'READY', 'SHARING'].includes(state.phase)) return { ok: false, error: `busy: job ${state.id} is ${state.phase}` };
   const b = await web.connect(); let pg;
   try {
-    pg = await web.openOwnTab(b);
+    pg = await web.openOwnTab(b, cmd.expectUser);
     const who = await web.whoami(pg);
     if (!who || who.toLowerCase() !== cmd.expectUser.toLowerCase()) return { ok: false, error: `logged in as ${who || 'unknown'}, expected ${cmd.expectUser} — nothing edited` };
     const fix = await web.editCaption(pg, cmd.permalink, cmd.caption);
@@ -156,14 +158,65 @@ async function editCaptionCmd(cmd) {
     const rb = classifyReadback({ caption: cmd.caption }, info.error ? null : info);
     log({ action: 'edit_caption', id: cmd.id, user: cmd.expectUser, permalink: cmd.permalink, readback: rb.state });
     return { ok: rb.state === 'SHARED', readback: rb };
-  } finally { await pg?.close().catch(() => {}); b.disconnect(); }
+  } finally { await web.closeOwn(pg, cmd.expectUser); b.disconnect(); }
+}
+
+// Story: prepare in an iPhone-emulated tab, stop at the editor (READY), share only on confirm.
+async function prepareStory(cmd) {
+  if (!fs.existsSync(winToWsl(cmd.file))) return { ok: false, error: `file not found (Windows path expected): ${cmd.file}` };
+  const job = { id: cmd.id, action: 'post_story', expectUser: cmd.expectUser, files: [cmd.file], music: cmd.music || null, expected: {} };
+  await setState({ phase: 'PREPARING', ...job });
+  const b = await web.connect(); let pg;
+  const fail = async (step, why) => {
+    const s = pg ? await shot(pg, cmd.id, `fail-${step}`) : null;
+    await web.closeOwn(pg, cmd.expectUser);
+    await setState({ phase: 'FAILED', ...job, step, why, screenshot: s });
+    return { ok: false, error: `${step}: ${why}`, screenshot: s };
+  };
+  try {
+    pg = await web.openOwnTab(b, cmd.expectUser);                     // desktop first: whoami reads the desktop nav
+    const who = await web.whoami(pg);
+    if (!who || who.toLowerCase() !== cmd.expectUser.toLowerCase()) return await fail('account', `logged in as ${who || 'unknown'}, expected ${cmd.expectUser} — nothing posted`);
+    const ed = await web.openStoryEditor(pg, cmd.file);
+    if (!ed.ok) return await fail('editor', ed.why);
+    const checks = { user: who, editor: true };
+    if (cmd.music) {
+      checks.music = await web.probeMusicSticker(pg);
+      if (!checks.music.music) return await fail('music', `no Music sticker in the tray (loading=${checks.music.loading}) — Phase 1b unproven, use the app path`);
+      // TODO(T2445 1b): search cmd.music.query + pick clip, once the tray is proven to load in emulation
+      return await fail('music', 'Music sticker present but search/pick not built yet (Phase 1b)');
+    }
+    const s = await shot(pg, cmd.id, 'ready');
+    await setState({ phase: 'READY', ...job, checks, screenshot: s });
+    return { ok: true, state: 'READY', checks, screenshot: s, next: `share needs {"action":"share","confirm":"${cmd.id}"}` };
+  } catch (err) { return await fail('exception', String(err?.message || err)); }
+  finally { b.disconnect(); }
+}
+
+async function shareStoryJob(pg, job, since) {
+  const sh = await web.shareStory(pg);
+  const s = await shot(pg, job.id, sh.ok ? 'shared' : 'share-fail');
+  let rb = null;
+  if (sh.ok) { await new Promise(r => setTimeout(r, 8000)); rb = await web.latestStory(pg, since); }
+  await web.closeOwn(pg, job.expectUser);
+  const phase = !sh.ok ? 'FAILED' : rb?.fresh > 0 ? 'SHARED' : 'SHARED_UNVERIFIED';
+  await setState({ ...job, phase, why: sh.why, readback: rb, screenshot: s });
+  log({ action: 'share_story', id: job.id, user: job.expectUser, phase, readback: rb });
+  return { ok: phase === 'SHARED', state: phase, readback: rb, error: sh.why, screenshot: s };
+}
+
+async function loginCmd(cmd) {
+  const b = await web.connect();
+  try { const r = await web.login(b, cmd.expectUser); log({ action: 'login', user: cmd.expectUser, ok: r.ok, why: r.why }); return r.ok ? { ok: true, cookies: r.cookies } : { ok: false, error: r.why }; }
+  finally { b.disconnect(); }
 }
 
 async function handle(cmd) {
   const errs = validateCommand(cmd, { allowUsers: ALLOW });
   if (errs.length) return { ok: false, error: errs.join('; ') };
   switch (cmd.action) {
-    case 'post_carousel': case 'post_reel': return prepare(cmd);
+    case 'post_carousel': case 'post_reel': case 'post_story': return prepare(cmd);
+    case 'login': return loginCmd(cmd);
     case 'share': return share(cmd);
     case 'abort': return abort();
     case 'edit_caption': return editCaptionCmd(cmd);
@@ -185,11 +238,14 @@ function onLine(line) {
   });
 }
 
+let sub = null, stopping = false;
+const stop = () => { stopping = true; sub?.kill(); process.exit(0); };   // never leave an orphan mosquitto_sub behind (pm2 restart = SIGINT)
+process.on('SIGINT', stop); process.on('SIGTERM', stop);
 function subscribe() {
-  const sub = spawn('mosquitto_sub', ['-h', 'localhost', '-t', T.cmd, '-R'], { stdio: ['ignore', 'pipe', 'inherit'] });
+  sub = spawn('mosquitto_sub', ['-h', 'localhost', '-t', T.cmd, '-R'], { stdio: ['ignore', 'pipe', 'inherit'] });
   let buf = '';
   sub.stdout.on('data', d => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { onLine(buf.slice(0, i)); buf = buf.slice(i + 1); } });
-  sub.on('close', code => { console.error(`mosquitto_sub exited ${code}, resubscribing in 3s`); setTimeout(subscribe, 3000); });
+  sub.on('close', code => { if (stopping) return; console.error(`mosquitto_sub exited ${code}, resubscribing in 3s`); setTimeout(subscribe, 3000); });
 }
 
 subscribe();

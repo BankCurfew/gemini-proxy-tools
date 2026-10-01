@@ -3,6 +3,9 @@
 // Rules: own tab only (window.name = TAB_NAME) and close it at the end · never restart Chrome · never window state ·
 // real input events only (puppeteer keyboard/mouse = CDP Input), never execCommand.
 import { createRequire } from 'module';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { captionExact, shortcodeFromUrl, shortcodeToPk } from './lib.mjs';
 const puppeteer = createRequire(import.meta.url)('../node_modules/puppeteer-core');
 
@@ -24,12 +27,72 @@ export async function findOwnTab(b) {
   return null;
 }
 
-export async function openOwnTab(b, url = 'https://www.instagram.com/') {
-  const pg = await b.newPage();
+// Which browser context an account runs in (bob ruling 1/10): only the production account uses แบงค์'s own
+// (default) context. Every other account gets an ISOLATED context — its own cookie store, loaded from a jar —
+// so a test login can never switch or log out the DreamBank session.
+const DEFAULT_CTX_USERS = (process.env.IG_BRIDGE_DEFAULT_CTX_USERS || 'dreambankiagencyaia').split(',').map(s => s.trim().toLowerCase());
+const JAR_DIR = process.env.IG_BRIDGE_DATA || path.join(os.homedir(), '.oracle', 'ig-bridge');
+export const jarPath = user => path.join(JAR_DIR, `jar-${user.toLowerCase()}.json`);
+export const usesDefaultContext = user => DEFAULT_CTX_USERS.includes(String(user).toLowerCase());
+
+async function contextFor(b, user) {
+  if (usesDefaultContext(user)) return { ctx: b.defaultBrowserContext(), isolated: false };
+  if (!fs.existsSync(jarPath(user))) throw new Error(`no cookie jar for ${user} — run: ig-post.sh login ${user}`);
+  const ctx = await b.createBrowserContext();
+  await ctx.setCookie(...JSON.parse(fs.readFileSync(jarPath(user), 'utf8')));
+  return { ctx, isolated: true };
+}
+
+export async function saveJar(pg, user) {
+  if (usesDefaultContext(user)) return false;
+  const cookies = (await pg.browserContext().cookies()).filter(c => /instagram\.com$/.test(c.domain.replace(/^\./, '')));
+  fs.mkdirSync(JAR_DIR, { recursive: true });
+  fs.writeFileSync(jarPath(user) + '.tmp', JSON.stringify(cookies), { mode: 0o600 });
+  fs.renameSync(jarPath(user) + '.tmp', jarPath(user));
+  return cookies.length;
+}
+
+// Close our tab, and the whole context if it was an isolated one (refreshing the jar first: IG rotates session cookies).
+export async function closeOwn(pg, user) {
+  if (!pg) return;
+  const ctx = pg.browserContext();
+  const isolated = ctx !== pg.browser().defaultBrowserContext();
+  if (isolated && user) await saveJar(pg, user).catch(() => {});
+  await pg.close().catch(() => {});
+  if (isolated) await ctx.close().catch(() => {});
+}
+
+export async function openOwnTab(b, user, url = 'https://www.instagram.com/') {
+  const { ctx } = await contextFor(b, user);
+  const pg = await ctx.newPage();
   await pg.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
   await pg.evaluate(n => { window.name = n; }, TAB_NAME);
   await sleep(4000);
   return pg;
+}
+
+// One-time login for a test account: opens the login page in a fresh isolated context and waits for a human to
+// sign in (password/2FA never pass through us), then stores the cookies in the jar (0600).
+export async function login(b, user, timeoutMs = 10 * 60 * 1000) {
+  if (usesDefaultContext(user)) return { ok: false, why: `${user} runs in the default context — never log in/out there` };
+  const ctx = await b.createBrowserContext();
+  const pg = await ctx.newPage();
+  try {
+    await pg.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await pg.evaluate(n => { window.name = n; }, TAB_NAME + '_LOGIN');
+    const until = Date.now() + timeoutMs;
+    while (Date.now() < until) {
+      await sleep(5000);
+      if (!/\/accounts\/login/.test(pg.url())) {
+        const who = await whoami(pg).catch(() => null);
+        if (who) {
+          if (who.toLowerCase() !== user.toLowerCase()) return { ok: false, why: `signed in as ${who}, expected ${user} — jar not saved` };
+          return { ok: true, cookies: await saveJar(pg, user) };
+        }
+      }
+    }
+    return { ok: false, why: 'login not completed in time' };
+  } finally { await pg.close().catch(() => {}); await ctx.close().catch(() => {}); }
 }
 
 export const dialogText = pg => pg.evaluate(() => [...document.querySelectorAll('div[role=dialog]')].map(d => d.innerText.replace(/\s+/g, ' ').slice(0, 300)).join(' | '));
@@ -192,4 +255,62 @@ export async function editCaption(pg, permalink, caption) {
   if (!await realClick(pg, done)) return { ok: false, why: 'no Done' };
   for (let i = 0; i < 20; i++) { await sleep(1000); if (!(await pg.$('div[role=dialog] [contenteditable=true]'))) return { ok: true }; }
   return { ok: false, why: 'edit dialog did not close after Done' };
+}
+
+// ---------- Stories (instagram.com in MOBILE emulation — bob probe 1/10, BoB-Oracle/ψ/lab/ig-mweb-probe.mjs) ----------
+// Desktop instagram.com has no Story composer; the iPhone-emulated site shows "+" → Post | Story → editor → "Share story".
+const IPHONE = { viewport: { width: 390, height: 844, deviceScaleFactor: 2, isMobile: true, hasTouch: true },
+  userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1' };
+const tapText = async (pg, src) => {
+  const h = await pg.evaluateHandle(src => { const rx = new RegExp(src, 'i');
+    const e = [...document.querySelectorAll('button,[role=button],a,div[tabindex],svg[aria-label],span')].find(e => rx.test((e.getAttribute('aria-label') || e.innerText || '').trim()));
+    return e ? (e.tagName === 'svg' || e.tagName === 'SPAN' ? (e.closest('a,button,[role=button],div[tabindex]') || e) : e) : null; }, src);
+  const el = h.asElement(); if (!el) return false;
+  await el.tap(); return true;
+};
+const pageText = pg => pg.evaluate(() => [...new Set([...document.querySelectorAll('[aria-label],button,[role=button],span,img[alt]')].map(e => (e.getAttribute('aria-label') || e.alt || e.innerText || '').trim()).filter(t => t && t.length < 40))].join(' | '));
+
+export async function openStoryEditor(pg, winFile) {
+  await pg.emulate(IPHONE);
+  await pg.goto('https://www.instagram.com/', { waitUntil: 'domcontentloaded', timeout: 45000 });
+  await pg.evaluate(n => { window.name = n; }, TAB_NAME);
+  await sleep(7000);
+  await tapText(pg, '^Not now$'); await sleep(1500);
+  // "+" top-right has no aria-label and the right-most icon is not it → bob's measured point at 390px width;
+  // the Story-option check below fails loudly if the layout moved.
+  const p = { x: 322, y: 22 };
+  await pg.touchscreen.tap(p.x, p.y); await sleep(3000);
+  if (!/(^|\|\s*)Story(\s*\||$)/.test(await pageText(pg))) return { ok: false, why: `"+" menu has no Story option (tapped ${Math.round(p.x)},${Math.round(p.y)})` };
+  const [fc] = await Promise.all([pg.waitForFileChooser({ timeout: 10000 }).catch(() => null), tapText(pg, '^Story$')]);
+  if (!fc) return { ok: false, why: 'Story tapped but no file chooser' };
+  await fc.accept([winFile]);
+  for (let i = 0; i < 30; i++) { await sleep(1000); if (/Share story|Your story/i.test(await pageText(pg))) return { ok: true }; }
+  return { ok: false, why: `story editor never showed "Share story": ${(await pageText(pg)).slice(0, 200)}` };
+}
+
+// Phase 1b (UNPROVEN): does the sticker tray offer Music in emulation? Report what the tray shows; never guess.
+export async function probeMusicSticker(pg, waitMs = 30000) {
+  if (!await tapText(pg, '^Stickers?$')) await pg.touchscreen.tap(185, 29);
+  const until = Date.now() + waitMs; let t = '';
+  while (Date.now() < until) { await sleep(2000); t = await pageText(pg); if (!/Loading/i.test(t) && /music|search/i.test(t)) break; }
+  return { music: /(^|\|\s*)Music(\s*\||$)/i.test(t), loading: /Loading/i.test(t), tray: t.slice(0, 400) };
+}
+
+export async function shareStory(pg) {
+  if (!await tapText(pg, '^(Share story|Your story)$')) return { ok: false, why: 'no Share story button' };
+  for (let i = 0; i < 36; i++) { await sleep(5000); if (!/Share story/i.test(await pageText(pg))) return { ok: true }; }
+  return { ok: false, why: 'still on the story editor after 3 min' };
+}
+
+// Readback: the account's live story items (ds_user_id cookie = the logged-in account id).
+export async function latestStory(pg, sinceSec) {
+  const uid = (await pg.browserContext().cookies()).find(c => c.name === 'ds_user_id')?.value;
+  if (!uid) return { error: 'no ds_user_id cookie' };
+  return pg.evaluate(async (uid, appId, since) => {
+    const r = await fetch(`/api/v1/feed/reels_media/?reel_ids=${uid}`, { headers: { 'X-IG-App-ID': appId }, credentials: 'include' });
+    if (!r.ok) return { error: `HTTP ${r.status}` };
+    const items = (await r.json())?.reels?.[uid]?.items || [];
+    const fresh = items.filter(i => i.taken_at >= since - 60);
+    return { total: items.length, fresh: fresh.length, newest: fresh.at(-1) && { pk: fresh.at(-1).pk, media_type: fresh.at(-1).media_type, taken_at: fresh.at(-1).taken_at } };
+  }, uid, IG_APP_ID, sinceSec);
 }

@@ -3,6 +3,8 @@
 #
 #   ig-post.sh carousel <dir-or-files...> --user U --caption-file F [--ratio 4:5|1:1|original]   → PREPARE only (READY + screenshot)
 #   ig-post.sh reel <video> --user U --caption-file F                                          → PREPARE only
+#   ig-post.sh story <image|video> --user U [--music "song query"]                              → PREPARE only (mobile-emulated editor)
+#   ig-post.sh login <user>                                                                     → one-time: a human signs in in an isolated context, cookies → jar
 #   ig-post.sh share <prepare-id>                                                               → posts the prepared job, reads it back
 #   ig-post.sh abort                                                                            → closes the prepared tab, nothing posted
 #   ig-post.sh edit <permalink> --user U --caption-file F                                       → edit caption + readback
@@ -15,13 +17,14 @@ STAGE_ROOT="${IG_BRIDGE_STAGE:-/mnt/c/Users/mbank/AppData/Local/Temp/ig-bridge}"
 die() { echo "ig-post: $*" >&2; exit 2; }
 
 ACTION="${1:-}"; shift || true
-USER_="" CAPFILE="" RATIO="4:5" POS=()
+USER_="" CAPFILE="" RATIO="4:5" MUSIC="" POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --user) USER_="$2"; shift 2;;
     --caption-file) CAPFILE="$2"; shift 2;;
     --ratio) RATIO="$2"; shift 2;;
-    -h|--help) sed -n 2,12p "$0"; exit 0;;
+    --music) MUSIC="$2"; shift 2;;
+    -h|--help) sed -n 2,14p "$0"; exit 0;;
     *) POS+=("$1"); shift;;
   esac
 done
@@ -82,6 +85,23 @@ case "$ACTION" in
     KEEP=1
     echo "READY — check the screenshot, then: $0 share $ID"
     ;;
+  story)
+    [ -n "$USER_" ] && [ ${#POS[@]} -eq 1 ] || die "usage: story <file> --user U [--music q]"
+    KEEP=0; trap '[ "$KEEP" = 1 ] || cleanup_stage "$ID"' EXIT
+    trap 'exit 130' INT TERM
+    mapfile -t WIN < <(stage_files)
+    P=$(jq -nc --arg id "$ID" --arg u "$USER_" --arg f "${WIN[0]}" --arg m "$MUSIC" '{id:$id,action:"post_story",file:$f,expectUser:$u} + (if $m=="" then {} else {music:{query:$m}} end)')
+    R=$(send "$P" 240)
+    echo "$R" | jq .
+    [ "$(jq -r .state <<<"$R")" = READY ] || exit 1
+    KEEP=1
+    echo "READY — check the screenshot, then: $0 share $ID"
+    ;;
+  login)
+    [ ${#POS[@]} -eq 1 ] || die "usage: login <user>"
+    echo "A login window opens in Chrome (isolated context). Sign in as ${POS[0]} there — waiting up to 10 min."
+    send "$(jq -nc --arg id "$ID" --arg u "${POS[0]}" '{id:$id,action:"login",expectUser:$u}')" 660 | jq .
+    ;;
   share)
     [ ${#POS[@]} -eq 1 ] || die "usage: share <prepare-id>"
     R=$(send "$(jq -nc --arg id "share-$$" --arg c "${POS[0]}" '{id:$id,action:"share",confirm:$c}')" 600)
@@ -102,5 +122,5 @@ case "$ACTION" in
     [ "$(jq -r .ok <<<"$R")" = true ] || exit 1
     ;;
   state) send "$(jq -nc --arg id "state-$$" '{id:$id,action:"state"}')" 15 | jq . ;;
-  *) sed -n 2,12p "$0"; exit 2;;
+  *) sed -n 2,14p "$0"; exit 2;;
 esac

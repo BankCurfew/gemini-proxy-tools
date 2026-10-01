@@ -46,6 +46,15 @@ export function validateCommand(cmd, { allowUsers = [] } = {}) {
   if (!cmd || typeof cmd !== 'object') return ['command must be a JSON object'];
   if (!cmd.id || typeof cmd.id !== 'string') errs.push('id (string) required');
   const posting = cmd.action === 'post_carousel' || cmd.action === 'post_reel';
+  if (cmd.action === 'post_story' || cmd.action === 'login') {
+    if (!cmd.expectUser) errs.push('expectUser required');
+    else if (!allowUsers.map(u => u.toLowerCase()).includes(String(cmd.expectUser).toLowerCase()))
+      errs.push(`expectUser ${cmd.expectUser} is not in IG_BRIDGE_ALLOW (${allowUsers.join(',') || 'empty'})`);
+  }
+  if (cmd.action === 'post_story') {
+    if (typeof cmd.file !== 'string' || !(IMG.test(cmd.file) || VID.test(cmd.file))) errs.push('file: one png/jpg/mp4 required');
+    if (cmd.music != null && (typeof cmd.music !== 'object' || !cmd.music.query)) errs.push('music: {query} required when given');
+  }
   if (posting || cmd.action === 'edit_caption') {
     if (!cmd.expectUser) errs.push('expectUser required');
     else if (!allowUsers.map(u => u.toLowerCase()).includes(String(cmd.expectUser).toLowerCase()))

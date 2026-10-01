@@ -51,3 +51,13 @@ test('readback: exact = SHARED, caption-only defect flagged for retry, count def
   assert.equal(n.state, 'SHARED_WITH_DEFECT'); assert.ok(!n.captionOnly);
   assert.equal(classifyReadback(exp, null).state, 'SHARED_UNVERIFIED');
 });
+test('validate: story + login need an allowed expectUser; music needs a query', () => {
+  const a = { allowUsers: ['tester'] };
+  assert.deepEqual(validateCommand({ id: 'x', action: 'post_story', file: 'C:\\s.png', expectUser: 'tester' }, a), []);
+  assert.deepEqual(validateCommand({ id: 'x', action: 'post_story', file: 'C:\\s.mp4', expectUser: 'tester', music: { query: 'song' } }, a), []);
+  assert.match(validateCommand({ id: 'x', action: 'post_story', file: 'C:\\s.gif', expectUser: 'tester' }, a).join(), /png\/jpg\/mp4/);
+  assert.match(validateCommand({ id: 'x', action: 'post_story', file: 'C:\\s.png', expectUser: 'tester', music: {} }, a).join(), /music/);
+  assert.match(validateCommand({ id: 'x', action: 'post_story', file: 'C:\\s.png', expectUser: 'dreambankiagencyaia' }, a).join(), /not in IG_BRIDGE_ALLOW/);
+  assert.match(validateCommand({ id: 'x', action: 'login' }, a).join(), /expectUser required/);
+  assert.deepEqual(validateCommand({ id: 'x', action: 'login', expectUser: 'tester' }, a), []);
+});
