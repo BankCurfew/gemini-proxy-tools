@@ -1,0 +1,197 @@
+#!/usr/bin/env node
+// ig-agent.mjs — MQTT-driven Instagram web poster (T2445 Phase 1). Runs under pm2 as "ig-bridge".
+//
+// MQTT (mosquitto on localhost:1883, same broker as gemini-proxy):
+//   claude/browser/ig/command   ← {"id","action",...}            one JSON per message
+//   claude/browser/ig/response  → {"id","action","ok","state",...} one per command
+//   claude/browser/ig/state     → current job state (retained)
+//
+// Two-step by design: post_* only PREPARES (stops before Share, screenshot + checks). Nothing is posted until a
+// second command {"action":"share","confirm":"<prepare id>"} names that exact prepared job.
+// Env: IG_BRIDGE_ALLOW=user1,user2 (accounts this agent may act on — empty = refuse everything).
+import { spawn } from 'child_process';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { validateCommand, ratioOk, classifyReadback, MEDIA_TYPE } from './lib.mjs';
+import * as web from './ig-web.mjs';
+
+const HOME = os.homedir();
+const DATA = process.env.IG_BRIDGE_DATA || path.join(HOME, '.oracle', 'ig-bridge');
+const SHOTS = process.env.IG_BRIDGE_SHOTS || path.join(HOME, '.maw', 'inbox', 'ig-bridge');
+const STATE_FILE = path.join(DATA, 'state.json');
+const LOG_FILE = path.join(DATA, 'actions.jsonl');
+// claude/browser/ig/*: the broker ACL lets anonymous clients use claude/browser/# only (claude/ig/* is silently dropped);
+// the gemini extension listens on exact topics there and does not answer claude/browser/ig/command (probed 1/10).
+const TP = process.env.IG_BRIDGE_TOPIC || 'claude/browser/ig';
+const T = { cmd: `${TP}/command`, res: `${TP}/response`, state: `${TP}/state` };
+const ALLOW = (process.env.IG_BRIDGE_ALLOW || '').split(',').map(s => s.trim()).filter(Boolean);
+fs.mkdirSync(DATA, { recursive: true }); fs.mkdirSync(SHOTS, { recursive: true });
+
+const now = () => new Date().toISOString();
+const log = rec => fs.appendFileSync(LOG_FILE, JSON.stringify({ ts: now(), ...rec }) + '\n');
+const pub = (topic, obj, retain = false) => new Promise(res => {
+  const p = spawn('mosquitto_pub', ['-h', 'localhost', '-t', topic, ...(retain ? ['-r'] : []), '-m', JSON.stringify(obj)], { stdio: 'ignore' });
+  p.on('close', res);
+});
+
+let state = { phase: 'IDLE' };
+try { state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch {}
+async function setState(s) {
+  state = { ...s, updated: now() };
+  fs.writeFileSync(STATE_FILE + '.tmp', JSON.stringify(state, null, 2)); fs.renameSync(STATE_FILE + '.tmp', STATE_FILE);
+  await pub(T.state, state, true);
+}
+
+const winToWsl = p => p.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, d) => `/mnt/${d.toLowerCase()}`);
+async function shot(pg, id, step) {
+  const f = path.join(SHOTS, `${id}-${step}.png`);
+  await pg.screenshot({ path: f }).catch(() => {});
+  return f;
+}
+
+// ---------- actions ----------
+async function prepare(cmd) {
+  if (['PREPARING', 'READY', 'SHARING'].includes(state.phase))
+    return { ok: false, error: `busy: job ${state.id} is ${state.phase} — share or abort it first` };
+  const reel = cmd.action === 'post_reel';
+  const files = reel ? [cmd.file] : cmd.files;
+  const missing = files.filter(f => !fs.existsSync(winToWsl(f)));
+  if (missing.length) return { ok: false, error: `files not found (Windows paths expected): ${missing.slice(0, 3).join(', ')}` };
+  const ratio = reel ? '9:16' : cmd.ratio;
+  const job = { id: cmd.id, action: cmd.action, expectUser: cmd.expectUser, ratio, files,
+    expected: { mediaType: reel ? MEDIA_TYPE.video : MEDIA_TYPE.carousel, count: reel ? null : files.length, caption: cmd.caption } };
+  await setState({ phase: 'PREPARING', ...job });
+
+  const b = await web.connect(); let pg;
+  const fail = async (step, why) => {
+    const s = pg ? await shot(pg, cmd.id, `fail-${step}`) : null;
+    if (pg) await pg.close().catch(() => {});
+    await setState({ phase: 'FAILED', ...job, step, why, screenshot: s });
+    return { ok: false, error: `${step}: ${why}`, screenshot: s };
+  };
+  try {
+    pg = await web.openOwnTab(b);
+    const who = await web.whoami(pg);
+    if (!who || who.toLowerCase() !== cmd.expectUser.toLowerCase()) return await fail('account', `logged in as ${who || 'unknown'}, expected ${cmd.expectUser} — nothing posted`);
+    let e = await web.openCreatePost(pg); if (e) return await fail('create', e);
+    e = await web.upload(pg, files); if (e) return await fail('upload', e);
+    e = await web.setCrop(pg, ratio); if (e) return await fail('crop', e);
+    const crop = await web.measureCrop(pg);
+    const r = ratioOk(crop.ratio, ratio);
+    if (!r.ok) return await fail('crop', `${r.why} [${crop.how}]`);
+    const checks = { user: who, crop: { ...r, how: crop.how } };
+    if (!reel) {
+      const m = await web.countMedia(pg);
+      checks.media = { ...m, expected: files.length };
+      if (m.count !== files.length) return await fail('count', `media count ${m.count} ≠ ${files.length} [${m.how}]`);
+    }
+    if (!await web.next(pg)) return await fail('next', 'Next (crop→edit) not found');
+    if (!await web.next(pg)) return await fail('next', 'Next (edit→caption) not found');
+    const typed = await web.typeCaption(pg, cmd.caption);
+    checks.caption = typed;
+    if (!typed.ok) return await fail('caption', `caption box text ≠ caption (${typed.why || typed.shownChars + ' chars shown'})`);
+    const s = await shot(pg, cmd.id, 'ready');
+    await setState({ phase: 'READY', ...job, checks, screenshot: s });
+    return { ok: true, state: 'READY', checks, screenshot: s, next: `share needs {"action":"share","confirm":"${cmd.id}"}` };
+  } catch (err) {
+    return await fail('exception', String(err?.message || err));
+  } finally { b.disconnect(); }
+}
+
+async function readbackAndFix(pg, job, sinceSec) {
+  const info = await web.findNewPost(pg, job.expectUser, sinceSec);
+  let rb = classifyReadback(job.expected, info);
+  const out = { info: info && { ...info, caption: undefined, captionChars: info.caption.length }, readback: rb };
+  if (rb.state === 'SHARED_WITH_DEFECT' && rb.captionOnly && info?.permalink) {     // one automatic caption repair
+    const fix = await web.editCaption(pg, info.permalink, job.expected.caption);
+    const again = await web.mediaInfo(pg, info.code);
+    rb = classifyReadback(job.expected, again.error ? null : again);
+    Object.assign(out, { captionRetry: fix, readback: rb });
+  }
+  return out;
+}
+
+async function share(cmd) {
+  if (state.phase !== 'READY') return { ok: false, error: `nothing to share: state is ${state.phase}` };
+  if (cmd.confirm !== state.id) return { ok: false, error: `confirm ${cmd.confirm} ≠ prepared job ${state.id}` };
+  const job = state;
+  const b = await web.connect();
+  try {
+    const pg = await web.findOwnTab(b);
+    if (!pg) { await setState({ ...job, phase: 'FAILED', why: 'prepared tab is gone' }); return { ok: false, error: 'prepared tab is gone — prepare again' }; }
+    await setState({ ...job, phase: 'SHARING' });
+    const since = Math.floor(Date.now() / 1000);
+    const sh = await web.clickShare(pg);
+    if (!sh.ok) { const s = await shot(pg, job.id, 'share-fail'); await pg.close().catch(() => {}); await setState({ ...job, phase: 'FAILED', why: sh.why, screenshot: s }); return { ok: false, error: sh.why, screenshot: s }; }
+    await shot(pg, job.id, 'shared');
+    const rb = await readbackAndFix(pg, job, since);
+    await pg.close().catch(() => {});
+    const phase = rb.readback.state;
+    await setState({ ...job, phase, ...rb, permalink: rb.info?.permalink });
+    log({ action: 'share', id: job.id, user: job.expectUser, phase, permalink: rb.info?.permalink, code: rb.info?.code, defects: rb.readback.defects });
+    return { ok: phase === 'SHARED', state: phase, permalink: rb.info?.permalink, ...rb };
+  } finally { b.disconnect(); }
+}
+
+async function abort() {
+  const b = await web.connect();
+  try { const pg = await web.findOwnTab(b); if (pg) await pg.close(); } finally { b.disconnect(); }
+  const was = state.phase;
+  await setState({ phase: 'ABORTED', id: state.id, was });
+  return { ok: true, state: 'ABORTED', was };
+}
+
+async function editCaptionCmd(cmd) {
+  if (['PREPARING', 'READY', 'SHARING'].includes(state.phase)) return { ok: false, error: `busy: job ${state.id} is ${state.phase}` };
+  const b = await web.connect(); let pg;
+  try {
+    pg = await web.openOwnTab(b);
+    const who = await web.whoami(pg);
+    if (!who || who.toLowerCase() !== cmd.expectUser.toLowerCase()) return { ok: false, error: `logged in as ${who || 'unknown'}, expected ${cmd.expectUser} — nothing edited` };
+    const fix = await web.editCaption(pg, cmd.permalink, cmd.caption);
+    if (!fix.ok) return { ok: false, error: fix.why, screenshot: await shot(pg, cmd.id, 'edit-fail') };
+    const code = cmd.permalink.match(/\/(?:p|reel|reels)\/([A-Za-z0-9_-]+)/)[1];
+    const info = await web.mediaInfo(pg, code);
+    const rb = classifyReadback({ caption: cmd.caption }, info.error ? null : info);
+    log({ action: 'edit_caption', id: cmd.id, user: cmd.expectUser, permalink: cmd.permalink, readback: rb.state });
+    return { ok: rb.state === 'SHARED', readback: rb };
+  } finally { await pg?.close().catch(() => {}); b.disconnect(); }
+}
+
+async function handle(cmd) {
+  const errs = validateCommand(cmd, { allowUsers: ALLOW });
+  if (errs.length) return { ok: false, error: errs.join('; ') };
+  switch (cmd.action) {
+    case 'post_carousel': case 'post_reel': return prepare(cmd);
+    case 'share': return share(cmd);
+    case 'abort': return abort();
+    case 'edit_caption': return editCaptionCmd(cmd);
+    case 'state': return { ok: true, state };
+    default: return { ok: false, error: `unknown action ${cmd.action}` };
+  }
+}
+
+// ---------- MQTT loop (serial: one browser job at a time) ----------
+let chain = Promise.resolve();
+function onLine(line) {
+  let cmd; try { cmd = JSON.parse(line); } catch { return; }
+  chain = chain.then(async () => {
+    const t0 = Date.now();
+    let res; try { res = await handle(cmd); } catch (e) { res = { ok: false, error: String(e?.message || e) }; }
+    const out = { id: cmd?.id ?? null, action: cmd?.action ?? null, ...res, ms: Date.now() - t0 };
+    log({ cmd: { ...cmd, caption: cmd?.caption ? `${cmd.caption.length} chars` : undefined }, res: { ok: out.ok, state: out.state, error: out.error } });
+    await pub(T.res, out);
+  });
+}
+
+function subscribe() {
+  const sub = spawn('mosquitto_sub', ['-h', 'localhost', '-t', T.cmd, '-R'], { stdio: ['ignore', 'pipe', 'inherit'] });
+  let buf = '';
+  sub.stdout.on('data', d => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { onLine(buf.slice(0, i)); buf = buf.slice(i + 1); } });
+  sub.on('close', code => { console.error(`mosquitto_sub exited ${code}, resubscribing in 3s`); setTimeout(subscribe, 3000); });
+}
+
+subscribe();
+await pub(T.state, state, true);
+console.log(`ig-bridge up · allow=${ALLOW.join(',') || '(none)'} · state=${state.phase} · log=${LOG_FILE}`);
