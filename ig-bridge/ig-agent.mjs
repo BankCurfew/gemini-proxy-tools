@@ -15,6 +15,10 @@ import os from 'os';
 import path from 'path';
 import { validateCommand, ratioOk, classifyReadback, MEDIA_TYPE } from './lib.mjs';
 import * as web from './ig-web.mjs';
+import * as graph from './graph.mjs';
+
+// Production account (default context) reads back through Graph (bob/แบงค์ 1/10); isolated test accounts via the web API.
+const viaGraph = (user) => web.usesDefaultContext(user) && graph.graphAvailable();
 
 const HOME = os.homedir();
 const DATA = process.env.IG_BRIDGE_DATA || path.join(HOME, '.oracle', 'ig-bridge');
@@ -101,12 +105,18 @@ async function prepare(cmd) {
 }
 
 async function readbackAndFix(pg, job, sinceSec) {
-  const info = await web.findNewPost(pg, job.expectUser, sinceSec);
+  const g = viaGraph(job.expectUser);
+  const find = async () => {
+    if (!g) return web.findNewPost(pg, job.expectUser, sinceSec);
+    for (let i = 0; i < 6; i++) { const m = await graph.graphFindNew(sinceSec); if (m) return m; await new Promise(r => setTimeout(r, 10000)); }   // Graph lags the UI by seconds
+    return null;
+  };
+  const info = await find();
   let rb = classifyReadback(job.expected, info);
   const out = { info: info && { ...info, caption: undefined, captionChars: info.caption.length }, readback: rb };
   if (rb.state === 'SHARED_WITH_DEFECT' && rb.captionOnly && info?.permalink) {     // one automatic caption repair
     const fix = await web.editCaption(pg, info.permalink, job.expected.caption);
-    const again = await web.mediaInfo(pg, info.code);
+    const again = g ? await graph.graphMedia(info.id).catch((e) => ({ error: String(e.message) })) : await web.mediaInfo(pg, info.code);
     rb = classifyReadback(job.expected, again.error ? null : again);
     Object.assign(out, { captionRetry: fix, readback: rb });
   }
@@ -154,7 +164,9 @@ async function editCaptionCmd(cmd) {
     const fix = await web.editCaption(pg, cmd.permalink, cmd.caption);
     if (!fix.ok) return { ok: false, error: fix.why, screenshot: await shot(pg, cmd.id, 'edit-fail') };
     const code = cmd.permalink.match(/\/(?:p|reel|reels)\/([A-Za-z0-9_-]+)/)[1];
-    const info = await web.mediaInfo(pg, code);
+    const info = viaGraph(cmd.expectUser)
+      ? await graph.graphFindByCode(code).catch((e) => ({ error: String(e.message) }))
+      : await web.mediaInfo(pg, code);
     const rb = classifyReadback({ caption: cmd.caption }, info.error ? null : info);
     log({ action: 'edit_caption', id: cmd.id, user: cmd.expectUser, permalink: cmd.permalink, readback: rb.state });
     return { ok: rb.state === 'SHARED', readback: rb };
@@ -197,7 +209,7 @@ async function shareStoryJob(pg, job, since) {
   const sh = await web.shareStory(pg);
   const s = await shot(pg, job.id, sh.ok ? 'shared' : 'share-fail');
   let rb = null;
-  if (sh.ok) { await new Promise(r => setTimeout(r, 8000)); rb = await web.latestStory(pg, since); }
+  if (sh.ok) { await new Promise(r => setTimeout(r, 8000)); rb = viaGraph(job.expectUser) ? await graph.graphStories(since).catch((e) => ({ error: String(e.message) })) : await web.latestStory(pg, since); }
   await web.closeOwn(pg, job.expectUser);
   const phase = !sh.ok ? 'FAILED' : rb?.fresh > 0 ? 'SHARED' : 'SHARED_UNVERIFIED';
   await setState({ ...job, phase, why: sh.why, readback: rb, screenshot: s });

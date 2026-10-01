@@ -171,14 +171,21 @@ export const measureCrop = pg => pg.evaluate(() => {
 export async function countMedia(pg) {
   const opened = await realClick(pg, await svgButton(pg, 'Open media gallery', 'div[role=dialog]'));
   await sleep(1200);
+  // Gallery tiles = div[role=button] of one identical shape in one row (probe 1/10, 16 uploads → 16 tiles 106x94).
+  // Count the largest such group; the "+" add tile has a different shape so it falls out.
   const n = await pg.evaluate(() => {
     const d = document.querySelector('div[role=dialog]'); if (!d) return 0;
-    // gallery thumbnails are background-image tiles of equal small size, in one row
-    const tiles = [...d.querySelectorAll('*')].filter(e => getComputedStyle(e).backgroundImage.startsWith('url(')).map(e => e.getBoundingClientRect()).filter(r => r.width > 30 && r.width < 140 && Math.abs(r.width - r.height) < 4);
-    return tiles.length;
+    const groups = {};
+    for (const e of d.querySelectorAll('[role=button]')) {
+      const r = e.getBoundingClientRect();
+      if (r.width < 40 || r.width > 160 || r.height < 40 || r.height > 160) continue;
+      const k = `${Math.round(r.width)}x${Math.round(r.height)}@${Math.round(r.y)}`;
+      groups[k] = (groups[k] || 0) + 1;
+    }
+    return Math.max(0, ...Object.values(groups));
   });
   if (opened) { await realClick(pg, await svgButton(pg, 'Open media gallery', 'div[role=dialog]')); await sleep(600); }
-  return { count: n, how: opened ? 'gallery thumbnails' : 'no gallery button' };
+  return { count: n, how: opened ? 'gallery tiles (same-shape role=button group)' : 'no gallery button' };
 }
 
 export async function next(pg) {
@@ -192,8 +199,13 @@ export async function typeCaption(pg, caption) {
   const box = await pg.$(CAPTION_SEL);
   if (!box) return { ok: false, why: `no caption box: ${await dialogText(pg)}` };
   await box.click(); await sleep(400);
-  // clear whatever is there (edit flow starts with the old caption)
-  await pg.keyboard.down('Control'); await pg.keyboard.press('a'); await pg.keyboard.up('Control'); await pg.keyboard.press('Backspace');
+  // Clear only when there is something to clear (edit flow). On an empty new-post box the Ctrl+A/Backspace pair
+  // made IG drop the first typed line (1/10 prepare run: only "line 2" survived).
+  const existing = await pg.evaluate(sel => ((document.querySelector(sel) || {}).innerText || '').trim(), CAPTION_SEL);
+  if (existing) {
+    await pg.keyboard.down('Control'); await pg.keyboard.press('a'); await pg.keyboard.up('Control'); await pg.keyboard.press('Backspace');
+    await sleep(400);
+  }
   const lines = caption.split('\n');
   for (let i = 0; i < lines.length; i++) {
     if (lines[i]) await pg.keyboard.sendCharacter(lines[i]);
