@@ -691,7 +691,7 @@ async function waitChatReady(page, timeoutMs) {
 }
 
 // One attempt. Returns 'confirmed' | 'no-composer-text' | 'send-disabled' | 'no-send-control' | 'no-new-turn'.
-async function sendOnce(page, text, { label = 'send', timeoutMs = 20000, waitEnabledMs = 60000 } = {}) {
+async function sendOnce(page, text, { label = 'send', timeoutMs = 20000, waitEnabledMs = 150000 } = {}) {  // T2406: 150s for send-button wait (was 60s; designer measured 60s stall after chat switch, recovered with reload)
   await installComposerFinder(page);
   const before = await page.evaluate(() => window.__posterTurns());
   const lastBefore = await lastUser(page);
@@ -1368,7 +1368,9 @@ async function newChat(page, rawBrandName) {
 
   // T2406 (แบงค์ '1 tab'): POSTER_ONE_TAB=1 reuses the connected ChatGPT tab (same-tab navigation) instead of
   // opening a second one. Default (flag unset) keeps the old new-tab path until the 3/3 acceptance switch-over.
-  const oneTab = process.env.POSTER_ONE_TAB === '1';
+  // T2406: one-tab is now the DEFAULT (designer verified 3/3 + Dalio live run, bob GO 1 Oct).
+  // Set POSTER_ONE_TAB=0 to revert to the old new-tab path.
+  const oneTab = process.env.POSTER_ONE_TAB !== '0';
   let newPage;
   if (oneTab) {
     newPage = page;
