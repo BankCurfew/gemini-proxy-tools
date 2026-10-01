@@ -322,7 +322,7 @@ async function connect() {
     console.log(`[connect] ChatGPT tab at ${chatgptPage.url()} — navigating to brand chat...`);
     // T2197: build the URL from activeChatId. BRAND_CHAT_URL is the bare home URL for brand-exempt
     // commands (status/images), so navigating there could never contain the chat id and always failed.
-    await chatgptPage.goto(`${cfg.chatgpt_url}/c/${activeChatId}`, { waitUntil: 'networkidle2' });
+    await chatgptPage.goto(`${cfg.chatgpt_url}/c/${activeChatId}`, { waitUntil: 'domcontentloaded', timeout: 30000 }); await sleep(3000); // T2427: domcontentloaded + 3s (networkidle2 hangs on SSE-heavy chats)
     await sleep(3000);
     // Verify navigation reached the target chat — ChatGPT may redirect to home or new chat
     if (!chatgptPage.url().includes(activeChatId)) {
@@ -379,7 +379,7 @@ async function rollBrandChat(page) {
   console.log(`Brand chat: ${count}/${max} images — ROTATING to fresh chat...`);
   heartbeat('#13', 2, `roll-brand (${count} images)`);
 
-  await page.goto(`${cfg.chatgpt_url}`, { waitUntil: 'networkidle2' });
+  await page.goto(`${cfg.chatgpt_url}`, { waitUntil: 'domcontentloaded', timeout: 30000 }); await sleep(3000);
   await sleep(2000);
 
   // Click "New chat" or navigate to base URL (which opens new chat)
@@ -664,7 +664,7 @@ async function sendAndConfirm(page, text, opts = {}) {
   // T2398: a tab can be stuck in a local "ChatGPT is still writing" state (send refused, no new turn). Reload, wait
   // until the chat is ready, and only resend if our message is NOT already the newest user turn (never double-send).
   console.error(`[${label}] retrying once after reload (${first})`);
-  await page.reload({ waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
   await waitChatReady(page, 45000);
   await installComposerFinder(page);
   const now = await lastUser(page);
@@ -1327,7 +1327,7 @@ async function generate(page, type, brief, taskId) {
     if (result.stalled && attempt < cfg.max_retries) {
       console.log('Refreshing page for retry...');
       try {
-        await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
         await sleep(3000);
       } catch (e) {
         console.error('Reload failed:', e.message);
@@ -1383,7 +1383,7 @@ async function newChat(page, rawBrandName) {
   const dropPage = async () => { if (!oneTab) await newPage.close(); };   // never close the one shared tab
 
   // Navigate to chatgpt.com home (fresh chat state)
-  await newPage.goto('https://chatgpt.com/', { waitUntil: 'networkidle2', timeout: 30000 });
+  await newPage.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 30000 }); await sleep(3000);
   await sleep(3000);
 
   // Verify we're on a clean home page, not redirected to an existing chat
