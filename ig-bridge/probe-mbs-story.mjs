@@ -54,6 +54,14 @@ try {
       inputs: await pg.evaluate(() => [...document.querySelectorAll('input,textarea')].filter(i => i.getBoundingClientRect().width > 0).map(i => i.placeholder || i.getAttribute('aria-label') || i.type)) });
     await pg.screenshot({ path: `${outDir}/mbs-after-${(out.after.length)}.png` });
   }
+  if (process.env.TARGETS) out.targets = await pg.evaluate(() => [...document.querySelectorAll('*')].filter(e => /^(Facebook story|Instagram story)$/.test((e.innerText || '').trim()) && e.childElementCount === 0)
+    .map(e => { let n = e, chain = []; for (let i = 0; i < 6 && n; i++, n = n.parentElement) chain.push(`${n.tagName.toLowerCase()}${n.getAttribute('role') ? '[role=' + n.getAttribute('role') + ']' : ''}${n.hasAttribute('aria-checked') ? '[aria-checked=' + n.getAttribute('aria-checked') + ']' : ''}${n.hasAttribute('aria-pressed') ? '[aria-pressed=' + n.getAttribute('aria-pressed') + ']' : ''}`);
+      const box = e.closest('label,[role=checkbox],[role=switch],[role=button],div')?.parentElement; const inp = box?.querySelector('input'); return { label: e.innerText.trim(), chain: chain.join(' < '), input: inp ? { type: inp.type, checked: inp.checked, disabled: inp.disabled, aria: inp.getAttribute('aria-label') } : null }; }));
+  if (process.env.DROPDOWN) out.options = await pg.evaluate(() => [...document.querySelectorAll('[role=checkbox],[role=option],[role=menuitemcheckbox],input[type=checkbox]')].filter(e => e.getBoundingClientRect().width > 0)
+    .map(e => ({ role: e.getAttribute('role') || e.type, checked: e.getAttribute('aria-checked') ?? e.checked, disabled: e.getAttribute('aria-disabled') ?? e.disabled,
+      sel: e.getAttribute('aria-selected'), inner: [...e.querySelectorAll('input,[role=checkbox],[aria-checked],[aria-selected]')].map(i => `${i.tagName}:${i.type || ''}:${i.checked ?? ''}:${i.getAttribute('aria-checked') ?? ''}:${i.getAttribute('aria-selected') ?? ''}`),
+      svgs: [...e.querySelectorAll('svg')].map(v => v.getAttribute('aria-label') || v.querySelector('path')?.getAttribute('d')?.slice(0, 18) || ''),
+      text: (e.innerText || e.getAttribute('aria-label') || e.closest('[role=option],[role=row],label,li')?.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 80) })));
   out.dialogs = await pg.evaluate(() => [...document.querySelectorAll('[role=dialog]')].map(d => d.innerText.replace(/\s+/g, ' ').slice(0, 1500)));
   out.url = pg.url(); out.title = await pg.title();
   out.ui = (await ui(pg)).slice(0, 2500);

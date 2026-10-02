@@ -24,6 +24,20 @@ there (password/2FA never pass through the bridge); the cookies are saved and re
 READY; `share` taps "Share story" and reads back the account's live story items. `--music` is Phase 1b and
 currently STOPs unless the sticker tray shows Music (tray stayed "Loading…" in bob's probe).
 
+## Facebook page story + swipe-up link (T2461)
+`post_fb_story` posts a **Facebook page** story with a link, through Meta Business Suite web (own tab, แบงค์'s
+session). Instagram stories cannot carry a link from the web — MBS says "This feature is not supported by
+Instagram" and the mobile-web IG editor has no Link sticker (probed 2/10) — so IG link stories go via the phone.
+- Identity: page id/name come from the Graph page token; its IG username must equal `--user` (production account only).
+- PREPARE: composer on that page → upload → **Share to = the page only** (MBS pre-selects the linked IG account too;
+  it is unticked and the field re-read) → Add link → URL typed → Apply → the link dialog is re-opened and read back
+  (screenshot `<id>-link.png`) → "Share now" must be the selected option → READY. No custom link text: MBS shows a
+  fixed "Visit link".
+- SHARE (`share` with confirm): re-checks Share to + link on the live composer, clicks Share, then Graph must show a
+  fresh page story AND its viewer must carry an `l.facebook.com/l.php?u=` link equal to the requested URL →
+  `SHARED`. Otherwise `SHARED_UNVERIFIED` (no story) / `SHARED_LINK_UNVERIFIED` (story, link not proven). Other
+  external anchors in the viewer (a Reader Mode extension injects some) are reported as `other`, never counted.
+
 ## Two-step, always
 `post_carousel` / `post_reel` only PREPARE: checks + screenshot, stop before Share. Posting needs a second command
 `share` with `confirm:<prepare id>`. READY requires: logged-in user == expectUser · media count == files · crop within 2% ·
@@ -34,9 +48,10 @@ caption box text == caption. After share: readback via instagram.com's web API �
 ig-post.sh carousel ./slides --user <acct> --caption-file cap.txt --ratio 4:5   # → READY + screenshot path
 ig-post.sh share <prepare-id>
 ig-post.sh story ./s.png --user <acct>
+ig-post.sh fb-story ./s.png --user <acct> --link https://tools.iagencyaia.com/ijourney   # FB page story + link
 ig-post.sh login <acct>
 ig-post.sh abort
 ig-post.sh edit https://www.instagram.com/p/<code>/ --user <acct> --caption-file cap.txt
 ig-post.sh state
 ```
-Log: `~/.oracle/ig-bridge/actions.jsonl` · screenshots: `~/.maw/inbox/ig-bridge/` · tests: `node --test ig-bridge/test/`
+Log: `~/.oracle/ig-bridge/actions.jsonl` · screenshots: `~/.maw/inbox/ig-bridge/` · tests: `node --test ig-bridge/test/*.test.mjs` (the bare directory form runs nothing)

@@ -1,6 +1,7 @@
 // graph.mjs — read a just-shared post back through the Graph API (production account, page token; never printed).
 // bob/แบงค์ 1/10: DreamBank's first real Share must be confirmed by Graph readback, not by the web UI.
 import fs from 'fs';
+import net from 'net';
 import os from 'os';
 import path from 'path';
 import { shortcodeFromUrl } from './lib.mjs';
@@ -12,10 +13,17 @@ const TYPE = { IMAGE: 1, VIDEO: 2, CAROUSEL_ALBUM: 8 };   // → the web media_t
 export const graphAvailable = () => { try { fs.accessSync(TOKEN_FILE, fs.constants.R_OK); return true; } catch { return false; } };
 const token = () => fs.readFileSync(TOKEN_FILE, 'utf8').trim();
 
+// IPv6 is unreachable here and the IPv4 handshake to graph.facebook.com often takes >250 ms — Node's default
+// per-address happy-eyeballs budget — so ~1 in 8 fetches died with ETIMEDOUT after ~430 ms (measured 2/10, T2461).
+net.setDefaultAutoSelectFamilyAttemptTimeout(2000);
+
 async function get(p, params = {}) {
   const u = new URL(`https://graph.facebook.com/${V}/${p}`);
   for (const [k, v] of Object.entries({ ...params, access_token: token() })) u.searchParams.set(k, v);
-  const r = await fetch(u);
+  let r;
+  for (let i = 0; ; i++) {   // retry network failures only (no HTTP response); an API error is never retried
+    try { r = await fetch(u); break; } catch (e) { if (i >= 2) throw new Error(`graph ${p}: network ${e.cause?.code || e.message}`); await new Promise(res => setTimeout(res, 1500)); }
+  }
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j.error) throw new Error(`graph ${p}: ${j.error?.message || 'HTTP ' + r.status}`);   // message only, never the URL (holds the token)
   return j;
@@ -64,4 +72,22 @@ export async function graphFindByCode(code) {
   const m = (j.data || []).find((x) => shortcodeFromUrl(x.permalink) === code);
   if (!m) throw new Error(`post ${code} not in the last 25`);
   return norm(m);
+}
+
+// ---------- Facebook page stories (T2461) ----------
+let page = null;
+/** The page the token belongs to: {id, name} — the MBS story composer is opened on this asset and must show this name. */
+export async function pageIdentity() {
+  if (!page) { const me = await get('me', { fields: 'id,name' }); page = { id: me.id, name: me.name }; }
+  return page;
+}
+
+/** Facebook page stories created at/after sinceSec (−60s skew). Graph exposes no link field on a story — the link
+ *  itself is read back in the story viewer (mbs-web.storyLinks); this only proves a story was published. */
+export async function graphPageStories(sinceSec) {
+  const { id } = await pageIdentity();
+  const j = await get(`${id}/stories`, { fields: 'post_id,status,creation_time,media_type,url,media_id', limit: '10' });
+  const items = j.data || [];
+  const fresh = items.filter((x) => Number(x.creation_time) >= sinceSec - 60);
+  return { total: items.length, fresh: fresh.length, newest: fresh[0] ? { post_id: fresh[0].post_id, status: fresh[0].status, created: Number(fresh[0].creation_time), media_type: fresh[0].media_type, url: fresh[0].url } : null, via: 'graph' };
 }

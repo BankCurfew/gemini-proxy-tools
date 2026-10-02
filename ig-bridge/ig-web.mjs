@@ -20,7 +20,7 @@ export async function connect() {
 
 export async function findOwnTab(b) {
   for (const t of b.targets()) {
-    if (t.type() !== 'page' || !t.url().includes('instagram.com')) continue;
+    if (t.type() !== 'page' || !/instagram\.com|business\.facebook\.com/.test(t.url())) continue;   // FB story composer (T2461) = MBS
     const pg = await t.asPage();
     if (await pg.evaluate(() => window.name).catch(() => '') === TAB_NAME) return pg;
   }

@@ -16,6 +16,7 @@ import path from 'path';
 import { validateCommand, ratioOk, classifyReadback, MEDIA_TYPE } from './lib.mjs';
 import * as web from './ig-web.mjs';
 import * as graph from './graph.mjs';
+import * as mbs from './mbs-web.mjs';
 
 // Production account (default context) reads back through Graph (bob/แบงค์ 1/10); isolated test accounts via the web API.
 const viaGraph = (user) => web.usesDefaultContext(user) && graph.graphAvailable();
@@ -59,6 +60,7 @@ async function prepare(cmd) {
   if (['PREPARING', 'READY', 'SHARING'].includes(state.phase))
     return { ok: false, error: `busy: job ${state.id} is ${state.phase} — share or abort it first` };
   if (cmd.action === 'post_story') return prepareStory(cmd);
+  if (cmd.action === 'post_fb_story') return prepareFbStory(cmd);
   const reel = cmd.action === 'post_reel';
   const files = reel ? [cmd.file] : cmd.files;
   const missing = files.filter(f => !fs.existsSync(winToWsl(f)));
@@ -134,6 +136,7 @@ async function share(cmd) {
     await setState({ ...job, phase: 'SHARING' });
     const since = Math.floor(Date.now() / 1000);
     if (job.action === 'post_story') return await shareStoryJob(pg, job, since);
+    if (job.action === 'post_fb_story') return await shareFbStoryJob(b, pg, job, since);
     const sh = await web.clickShare(pg);
     if (!sh.ok) { const s = await shot(pg, job.id, 'share-fail'); await web.closeOwn(pg, job.expectUser); await setState({ ...job, phase: 'FAILED', why: sh.why, screenshot: s }); return { ok: false, error: sh.why, screenshot: s }; }
     await shot(pg, job.id, 'shared');
@@ -217,6 +220,80 @@ async function shareStoryJob(pg, job, since) {
   return { ok: phase === 'SHARED', state: phase, readback: rb, error: sh.why, screenshot: s };
 }
 
+// ---------- Facebook page story + swipe-up link via Business Suite (T2461) ----------
+// Prepare stops before Share with: page identity checked against Graph, ONLY the FB page selected (the composer
+// pre-selects the linked IG account too, and IG cannot carry the link), link applied and re-read from its dialog.
+async function prepareFbStory(cmd) {
+  if (!fs.existsSync(winToWsl(cmd.file))) return { ok: false, error: `file not found (Windows path expected): ${cmd.file}` };
+  if (!viaGraph(cmd.expectUser)) return { ok: false, error: `post_fb_story needs the production account (default context + Graph token); ${cmd.expectUser} is not` };
+  const job = { id: cmd.id, action: 'post_fb_story', expectUser: cmd.expectUser, files: [cmd.file], link: cmd.link, expected: { link: cmd.link } };
+  await setState({ phase: 'PREPARING', ...job });
+  let page, ig;
+  try { page = await graph.pageIdentity(); ig = await graph.igUser(); }
+  catch (e) { await setState({ phase: 'FAILED', ...job, step: 'identity', why: String(e.message) }); return { ok: false, error: `identity: ${e.message}` }; }
+  if (ig.username.toLowerCase() !== cmd.expectUser.toLowerCase()) {
+    const why = `page token belongs to ${page.name} / IG ${ig.username}, not ${cmd.expectUser} — nothing prepared`;
+    await setState({ phase: 'FAILED', ...job, step: 'identity', why }); return { ok: false, error: why };
+  }
+  job.page = page;
+  const b = await web.connect(); let pg;
+  const fail = async (step, why) => {
+    const s = pg ? await shot(pg, cmd.id, `fail-${step}`) : null;
+    await web.closeOwn(pg, cmd.expectUser);
+    await setState({ phase: 'FAILED', ...job, step, why, screenshot: s });
+    return { ok: false, error: `${step}: ${why}`, screenshot: s };
+  };
+  try {
+    const o = await mbs.openComposer(b, page.id); pg = o.pg;
+    if (!o.ok) return await fail('composer', o.why);
+    const up = await mbs.upload(pg, cmd.file);
+    if (!up.ok) return await fail('upload', up.why);
+    const sel = await mbs.selectOnlyPage(pg, page.name);
+    if (!sel.ok) return await fail('share_to', sel.why);
+    const ln = await mbs.addLink(pg, cmd.link);
+    if (!ln.ok) return await fail('link', ln.why);
+    const linkShot = path.join(SHOTS, `${cmd.id}-link.png`);
+    const rl = await mbs.readLink(pg, linkShot);
+    if (rl.value !== cmd.link) return await fail('link_readback', `link dialog holds ${rl.value}, expected ${cmd.link}`);
+    if (await mbs.shareNowSelected(pg) !== 'true') return await fail('schedule', '"Share now" is not the selected option — refusing to prepare a scheduled post');
+    const field = await mbs.shareToText(pg);
+    if (field !== page.name) return await fail('share_to', `Share to changed to "${field}"`);
+    const checks = { page: page.name, shareTo: field, igDeselected: sel.changed, link: rl.value, linkButton: rl.button };
+    const s = await shot(pg, cmd.id, 'ready');
+    await setState({ phase: 'READY', ...job, checks, screenshot: s, linkScreenshot: linkShot });
+    return { ok: true, state: 'READY', checks, screenshot: s, linkScreenshot: linkShot, next: `share needs {"action":"share","confirm":"${cmd.id}"}` };
+  } catch (err) { return await fail('exception', String(err?.message || err)); }
+  finally { b.disconnect(); }
+}
+
+// Share: re-check target + link on the live composer (the tab sat open between prepare and GO), click Share, then
+// prove it: Graph shows a fresh page story AND its viewer carries a link equal to the requested one. Anything short
+// of that is not SHARED (fail-closed): SHARED_UNVERIFIED (no fresh story) / SHARED_LINK_UNVERIFIED (story, no link).
+async function shareFbStoryJob(b, pg, job, since) {
+  const field = await mbs.shareToText(pg);
+  const rl = await mbs.readLink(pg);
+  if (field !== job.page.name || rl.value !== job.link) {
+    const why = `composer changed since prepare (share to "${field}", link ${rl.value}) — not shared`;
+    const s = await shot(pg, job.id, 'share-refused'); await web.closeOwn(pg, job.expectUser);
+    await setState({ ...job, phase: 'FAILED', why, screenshot: s }); return { ok: false, error: why, screenshot: s };
+  }
+  const sh = await mbs.clickShare(pg);
+  const s = await shot(pg, job.id, sh.ok ? 'shared' : 'share-fail');
+  await web.closeOwn(pg, job.expectUser);
+  if (!sh.ok) { await setState({ ...job, phase: 'FAILED', why: sh.why, screenshot: s }); log({ action: 'share_fb_story', id: job.id, phase: 'FAILED', why: sh.why }); return { ok: false, error: sh.why, screenshot: s }; }
+  let rb = null, viewer = null;
+  for (let i = 0; i < 12 && !(rb?.fresh > 0); i++) {   // a page story can take a while to show up in Graph
+    await new Promise(r => setTimeout(r, 10000));
+    rb = await graph.graphPageStories(since).catch(e => ({ error: String(e.message) }));
+  }
+  if (rb?.fresh > 0 && rb.newest?.url) viewer = await mbs.storyLinks(b, rb.newest.url, job.page.name).catch(e => ({ error: String(e.message) }));
+  const linkOk = !!viewer?.rendered && (viewer.links || []).some(u => mbs.sameUrl(u, job.link));
+  const phase = !(rb?.fresh > 0) ? 'SHARED_UNVERIFIED' : linkOk ? 'SHARED' : 'SHARED_LINK_UNVERIFIED';
+  await setState({ ...job, phase, readback: rb, viewer, screenshot: s });
+  log({ action: 'share_fb_story', id: job.id, page: job.page.name, phase, story: rb?.newest?.post_id, link: job.link, viewerLinks: viewer?.links, rendered: viewer?.rendered });
+  return { ok: phase === 'SHARED', state: phase, readback: rb, viewer, screenshot: s };
+}
+
 async function loginCmd(cmd) {
   const b = await web.connect();
   try { const r = await web.login(b, cmd.expectUser); log({ action: 'login', user: cmd.expectUser, ok: r.ok, why: r.why }); return r.ok ? { ok: true, cookies: r.cookies } : { ok: false, error: r.why }; }
@@ -227,7 +304,7 @@ async function handle(cmd) {
   const errs = validateCommand(cmd, { allowUsers: ALLOW });
   if (errs.length) return { ok: false, error: errs.join('; ') };
   switch (cmd.action) {
-    case 'post_carousel': case 'post_reel': case 'post_story': return prepare(cmd);
+    case 'post_carousel': case 'post_reel': case 'post_story': case 'post_fb_story': return prepare(cmd);
     case 'login': return loginCmd(cmd);
     case 'share': return share(cmd);
     case 'abort': return abort();

@@ -1,7 +1,7 @@
 // node --test ig-bridge/test/lib.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { shortcodeToPk, shortcodeFromUrl, captionExact, ratioOk, validateCommand, classifyReadback } from '../lib.mjs';
+import { shortcodeToPk, shortcodeFromUrl, captionExact, ratioOk, validateCommand, classifyReadback, validLink } from '../lib.mjs';
 
 const ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 const pkToCode = pk => { let n = BigInt(pk), s = ''; while (n > 0n) { s = ALPHA[Number(n % 64n)] + s; n /= 64n; } return s; };
@@ -60,4 +60,20 @@ test('validate: story + login need an allowed expectUser; music needs a query', 
   assert.match(validateCommand({ id: 'x', action: 'post_story', file: 'C:\\s.png', expectUser: 'dreambankiagencyaia' }, a).join(), /not in IG_BRIDGE_ALLOW/);
   assert.match(validateCommand({ id: 'x', action: 'login' }, a).join(), /expectUser required/);
   assert.deepEqual(validateCommand({ id: 'x', action: 'login', expectUser: 'tester' }, a), []);
+});
+
+test('post_fb_story: link required, https only, no custom text, allow-list applies (T2461)', () => {
+  const ok = { id: 'f', action: 'post_fb_story', file: 'C:\\x\\a.png', link: 'https://tools.iagencyaia.com/ijourney', expectUser: 'dreambankiagencyaia' };
+  const A = { allowUsers: ['dreambankiagencyaia'] };
+  assert.deepEqual(validateCommand(ok, A), []);
+  assert.deepEqual(validateCommand({ ...ok, file: 'C:\\x\\a.mp4' }, A), []);
+  assert.match(validateCommand({ ...ok, link: undefined }, A).join(), /link/);
+  assert.match(validateCommand({ ...ok, link: 'http://tools.iagencyaia.com/x' }, A).join(), /https/);
+  assert.match(validateCommand({ ...ok, link: 'tools.iagencyaia.com/x' }, A).join(), /link/);
+  assert.match(validateCommand({ ...ok, link: 'https://a.com/x y' }, A).join(), /link/);
+  assert.match(validateCommand({ ...ok, linkText: 'ทำแบบทดสอบ' }, A).join(), /Visit link/);
+  assert.match(validateCommand({ ...ok, file: 'a.gif' }, A).join(), /file/);
+  assert.match(validateCommand(ok, { allowUsers: [] }).join(), /not in IG_BRIDGE_ALLOW/);
+  assert.equal(validLink('https://localhost/x'), false);
+  assert.equal(validLink('https://tools.iagencyaia.com/ijourney?src=story'), true);
 });

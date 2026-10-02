@@ -75,9 +75,22 @@ export function validateCommand(cmd, { allowUsers = [] } = {}) {
     if (typeof cmd.file !== 'string' || !VID.test(cmd.file)) errs.push('file: one mp4/mov required');
     if (cmd.ratio && cmd.ratio !== '9:16') errs.push('reel ratio is 9:16');
   }
+  if (cmd.action === 'post_fb_story') {   // T2461: Facebook PAGE story + swipe-up link via Business Suite (IG links unsupported there)
+    if (!cmd.expectUser) errs.push('expectUser required');
+    else if (!allowUsers.map(u => u.toLowerCase()).includes(String(cmd.expectUser).toLowerCase()))
+      errs.push(`expectUser ${cmd.expectUser} is not in IG_BRIDGE_ALLOW (${allowUsers.join(',') || 'empty'})`);
+    if (typeof cmd.file !== 'string' || !(IMG.test(cmd.file) || VID.test(cmd.file))) errs.push('file: one png/jpg/mp4 required');
+    if (!validLink(cmd.link)) errs.push('link: an absolute https:// URL (≤ 2000 chars) required');
+    if (cmd.linkText != null) errs.push('linkText: not supported — Business Suite shows a fixed "Visit link" label');
+  }
   if (cmd.action === 'edit_caption' && !shortcodeFromUrl(cmd.permalink)) errs.push('permalink: instagram.com/p|reel/<code> required');
   if (cmd.action === 'share' && !cmd.confirm) errs.push('confirm: <prepare id> required (share is a second, explicit command)');
   return errs;
+}
+
+export function validLink(u) {
+  if (typeof u !== 'string' || u.length > 2000 || /\s/.test(u)) return false;
+  try { const x = new URL(u); return x.protocol === 'https:' && !!x.hostname && x.hostname.includes('.'); } catch { return false; }
 }
 
 // Compare what IG stored with what we asked for. Never "success" on a partial match.

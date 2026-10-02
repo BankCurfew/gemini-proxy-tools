@@ -4,6 +4,7 @@
 #   ig-post.sh carousel <dir-or-files...> --user U --caption-file F [--ratio 4:5|1:1|original]   → PREPARE only (READY + screenshot)
 #   ig-post.sh reel <video> --user U --caption-file F                                          → PREPARE only
 #   ig-post.sh story <image|video> --user U [--music "song query"]                              → PREPARE only (mobile-emulated editor)
+#   ig-post.sh fb-story <image|video> --user U --link https://…                                  → PREPARE only (FB PAGE story + swipe-up link via Business Suite; IG not touched)
 #   ig-post.sh login <user>                                                                     → one-time: a human signs in in an isolated context, cookies → jar
 #   ig-post.sh share <prepare-id>                                                               → posts the prepared job, reads it back
 #   ig-post.sh abort                                                                            → closes the prepared tab, nothing posted
@@ -17,13 +18,14 @@ STAGE_ROOT="${IG_BRIDGE_STAGE:-/mnt/c/Users/mbank/AppData/Local/Temp/ig-bridge}"
 die() { echo "ig-post: $*" >&2; exit 2; }
 
 ACTION="${1:-}"; shift || true
-USER_="" CAPFILE="" RATIO="4:5" MUSIC="" POS=()
+USER_="" CAPFILE="" RATIO="4:5" MUSIC="" LINK="" POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --user) USER_="$2"; shift 2;;
     --caption-file) CAPFILE="$2"; shift 2;;
     --ratio) RATIO="$2"; shift 2;;
     --music) MUSIC="$2"; shift 2;;
+    --link) LINK="$2"; shift 2;;
     -h|--help) sed -n 2,14p "$0"; exit 0;;
     *) POS+=("$1"); shift;;
   esac
@@ -96,6 +98,18 @@ case "$ACTION" in
     [ "$(jq -r .state <<<"$R")" = READY ] || exit 1
     KEEP=1
     echo "READY — check the screenshot, then: $0 share $ID"
+    ;;
+  fb-story)
+    [ -n "$USER_" ] && [ -n "$LINK" ] && [ ${#POS[@]} -eq 1 ] || die "usage: fb-story <file> --user U --link https://…"
+    KEEP=0; trap '[ "$KEEP" = 1 ] || cleanup_stage "$ID"' EXIT
+    trap 'exit 130' INT TERM
+    mapfile -t WIN < <(stage_files)
+    P=$(jq -nc --arg id "$ID" --arg u "$USER_" --arg f "${WIN[0]}" --arg l "$LINK" '{id:$id,action:"post_fb_story",file:$f,link:$l,expectUser:$u}')
+    R=$(send "$P" 240)
+    echo "$R" | jq .
+    [ "$(jq -r .state <<<"$R")" = READY ] || exit 1
+    KEEP=1
+    echo "READY — check both screenshots (composer + link dialog), then: $0 share $ID   (or: $0 abort)"
     ;;
   login)
     [ ${#POS[@]} -eq 1 ] || die "usage: login <user>"
