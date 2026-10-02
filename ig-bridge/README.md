@@ -32,7 +32,7 @@ Instagram" and the mobile-web IG editor has no Link sticker (probed 2 Oct 2026) 
 - PREPARE: composer on that page → upload → **Share to = the page only** (MBS pre-selects the linked IG account too;
   the IG account is unticked and the field is re-read) → Add link → URL typed → Apply → the link dialog is re-opened and read back
   (screenshot `<id>-link.png`) → "Share now" must be the selected option → Share must be enabled (MBS greys it out instead of
-  failing, e.g. a video over **30 s** — the Facebook story limit; Instagram's is 60 s) → READY. No custom link text: the link dialog has one URL field and no label
+  failing, e.g. a video over **30 s** — the Facebook story limit, shown by MBS 2 Oct 2026) → READY. No custom link text: the link dialog has one URL field and no label
   field (what the viewer button says is set by Facebook, not by us).
 - SHARE (`share` with confirm): re-checks Share to + link on the live composer, clicks Share, then Graph must show a
   fresh page story AND its viewer must carry an `l.facebook.com/l.php?u=` link equal to the requested URL →
