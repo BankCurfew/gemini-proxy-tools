@@ -27,16 +27,30 @@ currently STOPs unless the sticker tray shows Music (tray stayed "Loading…" in
 ## Facebook page story + swipe-up link (T2461)
 `post_fb_story` posts a **Facebook page** story with a link, through Meta Business Suite web (own tab, แบงค์'s
 session). Instagram stories cannot carry a link from the web — MBS says "This feature is not supported by
-Instagram" and the mobile-web IG editor has no Link sticker (probed 2/10) — so IG link stories go via the phone.
-- Identity: page id/name come from the Graph page token; its IG username must equal `--user` (production account only).
+Instagram" and the mobile-web IG editor has no Link sticker (probed 2 Oct 2026) — so IG link stories go via the phone.
+- Identity: page id/name come from the Graph page token; the page's linked IG username must equal `--user` (production account only).
 - PREPARE: composer on that page → upload → **Share to = the page only** (MBS pre-selects the linked IG account too;
-  it is unticked and the field re-read) → Add link → URL typed → Apply → the link dialog is re-opened and read back
-  (screenshot `<id>-link.png`) → "Share now" must be the selected option → READY. No custom link text: MBS shows a
-  fixed "Visit link".
+  the IG account is unticked and the field is re-read) → Add link → URL typed → Apply → the link dialog is re-opened and read back
+  (screenshot `<id>-link.png`) → "Share now" must be the selected option → Share must be enabled (MBS greys it out instead of
+  failing, e.g. a video over **30 s** — the Facebook story limit; Instagram's is 60 s) → READY. No custom link text: the link dialog has one URL field and no label
+  field (what the viewer button says is set by Facebook, not by us).
 - SHARE (`share` with confirm): re-checks Share to + link on the live composer, clicks Share, then Graph must show a
   fresh page story AND its viewer must carry an `l.facebook.com/l.php?u=` link equal to the requested URL →
   `SHARED`. Otherwise `SHARED_UNVERIFIED` (no story) / `SHARED_LINK_UNVERIFIED` (story, link not proven). Other
   external anchors in the viewer (a Reader Mode extension injects some) are reported as `other`, never counted.
+- On `SHARED_LINK_UNVERIFIED`: the story is live — open the story URL in the state (`ig-post.sh state` →
+  `readback.newest.url`), tap the link by hand; if it is missing or wrong, delete the story in MBS and post again.
+
+### Runbook — one FB page story with a link
+```bash
+cd ~/repos/github.com/BankCurfew/gemini-proxy-tools/ig-bridge
+./ig-post.sh fb-story "<video ≤30 s or image>" --user dreambankiagencyaia --link https://journey.iagencyaia.com
+#   → READY + two screenshots in ~/.maw/inbox/ig-bridge/: <id>-ready.png (target = page only) and <id>-link.png (URL)
+#   → any FAILED: read `error` (e.g. "Share is disabled: … can be up to 30 seconds"); nothing was posted
+./ig-post.sh share <id>      # the GO: publishes, then Graph + viewer readback; exit 0 only on SHARED
+./ig-post.sh abort           # instead of share: closes the tab, nothing posted
+./ig-post.sh state           # readback detail: readback.newest (story) + viewer.links / viewer.rendered
+```
 
 ## Two-step, always
 `post_carousel` / `post_reel` only PREPARE: checks + screenshot, stop before Share. Posting needs a second command

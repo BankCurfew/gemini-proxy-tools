@@ -113,6 +113,17 @@ export async function readLink(pg, shotPath = null) {
   return { ok: true, button: label, value: val };
 }
 
+// Is the composer actually shareable? MBS greys out Share (and shows e.g. "Trim video length … can be up to 30
+// seconds" / "Video is too long") instead of failing loudly — a 45 s video reached READY before this check (2 Oct 2026).
+// Share disabled is the gate; the visible messages are the reason.
+export const shareBlockers = pg => pg.evaluate(() => {
+  const share = [...document.querySelectorAll('[role=button],button')].filter(e => e.getBoundingClientRect().width > 0 && (e.innerText || '').trim() === 'Share').at(-1);
+  const disabled = !share ? null : share.getAttribute('aria-disabled') === 'true' || share.disabled === true;
+  const msgs = [...new Set([...document.querySelectorAll('span,div')].filter(e => e.childElementCount === 0 && e.getBoundingClientRect().width > 0)
+    .map(e => (e.innerText || '').trim()).filter(t => t.length < 200 && /too long|too short|can be up to|not supported|unsupported|couldn.t|failed|trim video|error/i.test(t)))];
+  return { found: !!share, disabled, messages: msgs.slice(0, 6) };
+});
+
 export const shareNowSelected = pg => pg.evaluate(() => {
   const b = [...document.querySelectorAll('[role=button],button')].find(e => (e.innerText || '').trim() === 'Share now');
   return b ? (b.getAttribute('aria-pressed') ?? b.getAttribute('aria-checked') ?? b.getAttribute('aria-selected')) : null;

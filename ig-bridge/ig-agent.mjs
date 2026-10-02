@@ -258,6 +258,8 @@ async function prepareFbStory(cmd) {
     if (await mbs.shareNowSelected(pg) !== 'true') return await fail('schedule', '"Share now" is not the selected option — refusing to prepare a scheduled post');
     const field = await mbs.shareToText(pg);
     if (field !== page.name) return await fail('share_to', `Share to changed to "${field}"`);
+    const bl = await mbs.shareBlockers(pg);
+    if (!bl.found || bl.disabled !== false) return await fail('blocked', `Share is ${bl.found ? 'disabled' : 'missing'}: ${bl.messages.join(' · ') || 'no message shown'}`);
     const checks = { page: page.name, shareTo: field, igDeselected: sel.changed, link: rl.value, linkButton: rl.button };
     const s = await shot(pg, cmd.id, 'ready');
     await setState({ phase: 'READY', ...job, checks, screenshot: s, linkScreenshot: linkShot });
@@ -276,6 +278,12 @@ async function shareFbStoryJob(b, pg, job, since) {
     const why = `composer changed since prepare (share to "${field}", link ${rl.value}) — not shared`;
     const s = await shot(pg, job.id, 'share-refused'); await web.closeOwn(pg, job.expectUser);
     await setState({ ...job, phase: 'FAILED', why, screenshot: s }); return { ok: false, error: why, screenshot: s };
+  }
+  const bl = await mbs.shareBlockers(pg);
+  if (!bl.found || bl.disabled !== false) {
+    const why = `Share is ${bl.found ? 'disabled' : 'missing'}: ${bl.messages.join(' · ') || 'no message shown'} — not shared`;
+    const s0 = await shot(pg, job.id, 'share-refused'); await web.closeOwn(pg, job.expectUser);
+    await setState({ ...job, phase: 'FAILED', why, screenshot: s0 }); return { ok: false, error: why, screenshot: s0 };
   }
   const sh = await mbs.clickShare(pg);
   const s = await shot(pg, job.id, sh.ok ? 'shared' : 'share-fail');

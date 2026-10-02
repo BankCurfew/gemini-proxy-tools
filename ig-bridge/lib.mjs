@@ -81,7 +81,7 @@ export function validateCommand(cmd, { allowUsers = [] } = {}) {
       errs.push(`expectUser ${cmd.expectUser} is not in IG_BRIDGE_ALLOW (${allowUsers.join(',') || 'empty'})`);
     if (typeof cmd.file !== 'string' || !(IMG.test(cmd.file) || VID.test(cmd.file))) errs.push('file: one png/jpg/mp4 required');
     if (!validLink(cmd.link)) errs.push('link: an absolute https:// URL (≤ 2000 chars) required');
-    if (cmd.linkText != null) errs.push('linkText: not supported — Business Suite shows a fixed "Visit link" label');
+    if (cmd.linkText != null) errs.push('linkText: not supported — the Business Suite link dialog has one URL field and no label field');
   }
   if (cmd.action === 'edit_caption' && !shortcodeFromUrl(cmd.permalink)) errs.push('permalink: instagram.com/p|reel/<code> required');
   if (cmd.action === 'share' && !cmd.confirm) errs.push('confirm: <prepare id> required (share is a second, explicit command)');

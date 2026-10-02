@@ -71,7 +71,7 @@ test('post_fb_story: link required, https only, no custom text, allow-list appli
   assert.match(validateCommand({ ...ok, link: 'http://tools.iagencyaia.com/x' }, A).join(), /https/);
   assert.match(validateCommand({ ...ok, link: 'tools.iagencyaia.com/x' }, A).join(), /link/);
   assert.match(validateCommand({ ...ok, link: 'https://a.com/x y' }, A).join(), /link/);
-  assert.match(validateCommand({ ...ok, linkText: 'ทำแบบทดสอบ' }, A).join(), /Visit link/);
+  assert.match(validateCommand({ ...ok, linkText: 'ทำแบบทดสอบ' }, A).join(), /no label field/);
   assert.match(validateCommand({ ...ok, file: 'a.gif' }, A).join(), /file/);
   assert.match(validateCommand(ok, { allowUsers: [] }).join(), /not in IG_BRIDGE_ALLOW/);
   assert.equal(validLink('https://localhost/x'), false);
