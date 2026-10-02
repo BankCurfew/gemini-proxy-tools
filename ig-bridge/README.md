@@ -69,3 +69,10 @@ ig-post.sh edit https://www.instagram.com/p/<code>/ --user <acct> --caption-file
 ig-post.sh state
 ```
 Log: `~/.oracle/ig-bridge/actions.jsonl` · screenshots: `~/.maw/inbox/ig-bridge/` · tests: `node --test ig-bridge/test/*.test.mjs` (the bare directory form runs nothing)
+
+## Planner gate (T2472)
+แบงค์ 3 Oct: everything posted must be on the DreamBank planner. `carousel`, `reel`, `story` and `fb-story` call
+`dreambank-reels/scripts/planner_gate.py` before preparing (platform + type, planned time within ±60 min of now) and
+`share` calls it again at the moment it publishes. No row → refused, nothing prepared or posted. Fail closed: if the gate
+script is missing, nothing posts. Escape hatch: `--unplanned "<reason>"` appends the row to planner.yaml, pushes it,
+then prepares. Mapping: carousel/reel → `ig`; story and fb-story → `story`.

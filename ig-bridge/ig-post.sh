@@ -11,6 +11,9 @@
 #   ig-post.sh edit <permalink> --user U --caption-file F                                       → edit caption + readback
 #   ig-post.sh state
 #
+# PLANNER GATE (T2472, แบงค์ 3 Oct "whatever inserts should always be on planner"): carousel/reel/story/fb-story refuse
+# to prepare unless dreambank-reels data/planner.yaml has a row for it (platform + type, ±60 min of now), and `share`
+# re-checks at the moment it publishes. --unplanned "<reason>" appends + pushes the row first, then posts.
 # Files: the browser can't read WSL paths → files are copied to a Windows staging dir and removed after share/abort/fail.
 set -euo pipefail
 HOST=localhost; TP="${IG_BRIDGE_TOPIC:-claude/browser/ig}"; CMD_T=$TP/command; RES_T=$TP/response
@@ -18,7 +21,7 @@ STAGE_ROOT="${IG_BRIDGE_STAGE:-/mnt/c/Users/mbank/AppData/Local/Temp/ig-bridge}"
 die() { echo "ig-post: $*" >&2; exit 2; }
 
 ACTION="${1:-}"; shift || true
-USER_="" CAPFILE="" RATIO="4:5" MUSIC="" LINK="" POS=()
+USER_="" CAPFILE="" RATIO="4:5" MUSIC="" LINK="" UNPLANNED="" POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --user) USER_="$2"; shift 2;;
@@ -26,6 +29,7 @@ while [ $# -gt 0 ]; do
     --ratio) RATIO="$2"; shift 2;;
     --music) MUSIC="$2"; shift 2;;
     --link) LINK="$2"; shift 2;;
+    --unplanned) UNPLANNED="$2"; shift 2;;
     -h|--help) sed -n 2,14p "$0"; exit 0;;
     *) POS+=("$1"); shift;;
   esac
@@ -47,6 +51,18 @@ stage_files() {  # copy inputs (files or one dir) into the staging dir, print Wi
   done
 }
 cleanup_stage() { [ -n "${1:-}" ] && rm -rf "${STAGE_ROOT:?}/$1"; }
+
+# T2472 planner gate — fail closed: no gate script = no post
+GATE="${PLANNER_GATE:-$HOME/repos/github.com/BankCurfew/dreambank-reels/scripts/planner_gate.py}"   # override = tests only
+GATE_DIR="$HOME/.cache/ig-bridge/gate"
+planner_gate() {  # <platform> <type> <prepare-id> — refuses (exit) unless the planner has the row; records it for share
+  [ -f "$GATE" ] || die "planner gate missing ($GATE) — refusing to post"
+  local title; title=$(basename "${POS[0]:-post}"); title="${title%.*}"
+  local a=(--platform "$1" --type "$2" --title "$title")
+  [ -n "$UNPLANNED" ] && a+=(--unplanned "$UNPLANNED")
+  python3 "$GATE" "${a[@]}" || { echo "ig-post: REFUSED by planner gate — nothing prepared, nothing posted" >&2; exit 1; }
+  mkdir -p "$GATE_DIR"; printf '%s %s\n' "$1" "$2" > "$GATE_DIR/$3"
+}
 
 send() {  # $1 = json payload, $2 = timeout seconds; prints the matching response
   local payload="$1" to="$2" id; id=$(jq -r .id <<<"$payload")
@@ -71,6 +87,7 @@ caption_json() { [ -f "$CAPFILE" ] || die "--caption-file required"; jq -Rs . < 
 case "$ACTION" in
   carousel|reel)
     [ -n "$USER_" ] || die "--user required"
+    planner_gate ig "$ACTION" "$ID"
     CAP=$(caption_json)
     KEEP=0; trap '[ "$KEEP" = 1 ] || cleanup_stage "$ID"' EXIT   # any exit short of READY (incl. Ctrl-C/timeout) removes the staged copies
     trap 'exit 130' INT TERM
@@ -89,6 +106,7 @@ case "$ACTION" in
     ;;
   story)
     [ -n "$USER_" ] && [ ${#POS[@]} -eq 1 ] || die "usage: story <file> --user U [--music q]"
+    planner_gate story story "$ID"
     KEEP=0; trap '[ "$KEEP" = 1 ] || cleanup_stage "$ID"' EXIT
     trap 'exit 130' INT TERM
     mapfile -t WIN < <(stage_files)
@@ -101,6 +119,7 @@ case "$ACTION" in
     ;;
   fb-story)
     [ -n "$USER_" ] && [ -n "$LINK" ] && [ ${#POS[@]} -eq 1 ] || die "usage: fb-story <file> --user U --link https://…"
+    planner_gate story story "$ID"
     KEEP=0; trap '[ "$KEEP" = 1 ] || cleanup_stage "$ID"' EXIT
     trap 'exit 130' INT TERM
     mapfile -t WIN < <(stage_files)
@@ -118,9 +137,14 @@ case "$ACTION" in
     ;;
   share)
     [ ${#POS[@]} -eq 1 ] || die "usage: share <prepare-id>"
+    # re-check at the moment of publishing (the row was there at prepare; it must still be within ±60 min now)
+    [ -f "$GATE_DIR/${POS[0]}" ] || die "no planner-gate record for ${POS[0]} (prepared before T2472?) — abort and prepare again"
+    read -r GP GT < "$GATE_DIR/${POS[0]}"
+    [ -f "$GATE" ] || die "planner gate missing ($GATE) — refusing to post"
+    python3 "$GATE" --platform "$GP" --type "$GT" || { echo "ig-post: REFUSED by planner gate at share — not posted (abort, or fix the planner)" >&2; exit 1; }
     R=$(send "$(jq -nc --arg id "share-$$" --arg c "${POS[0]}" '{id:$id,action:"share",confirm:$c}')" 600)
     echo "$R" | jq .
-    cleanup_stage "${POS[0]}"
+    cleanup_stage "${POS[0]}"; rm -f "$GATE_DIR/${POS[0]}"
     [ "$(jq -r .state <<<"$R")" = SHARED ] || exit 1
     ;;
   abort)
