@@ -25,6 +25,9 @@ function isPosterImage(img) {
   if (!w || !h || w <= 300 || h <= 300) return false;
   const alt = img.alt || "";
   const src = img.src || "";
+  // T2477: a reference image the USER attached renders as blob: too (alt "User attachment", 600x300 on 3/10) —
+  // counting it shifted every index and could satisfy the gen count check before the real image existed.
+  if (alt.startsWith("User attachment")) return false;
   const generatedAlt = alt.startsWith("Generated");
   // Known generated-image sources. estuary = new OpenAI CDN for gpt-image/DALL-E output.
   const knownSrc =
@@ -35,6 +38,9 @@ function isPosterImage(img) {
 }
 
 // Selector string for page.evaluate on getImageCount (kept in sync with isPosterImage).
-const POSTER_IMG_SELECTOR = 'img[alt*="Generated"], img[src*="blob:"], img[src*="oaidalleapi"], img[src*="estuary"]';
+// T2477: every clause excludes user attachments (alt "User attachment" — blob: srcs, no turn markers in today's DOM).
+const NOT_ATTACH = ':not([alt^="User attachment"])';
+const POSTER_IMG_SELECTOR = ['img[alt*="Generated"]', 'img[src*="blob:"]', 'img[src*="oaidalleapi"]', 'img[src*="estuary"]']
+  .map((s) => s + NOT_ATTACH).join(', ');
 
 module.exports = { isPosterImageOld, isPosterImage, POSTER_IMG_SELECTOR };

@@ -62,10 +62,12 @@ test('SYNC GUARD: browser selector and Node predicate agree on estuary', () => {
     src, alt, naturalWidth: w, naturalHeight: h, width: w, height: h,
     matches(sel) {
       return sel.split(',').some((part) => {
-        const m = part.trim().match(/^img\[([^=]+)(?:=?)\*?="?([^"]*)"?\]$/);
+        // T2477: clauses may end in :not([alt^="…"]) (user-attachment exclusion)
+        const m = part.trim().match(/^img\[([^=]+)(?:=?)\*?="?([^"]*)"?\](?::not\(\[alt\^="([^"]*)"\]\))?$/);
         if (!m) return false;
         const attr = m[1].replace('*', '');
         const val = m[2];
+        if (m[3] && (this.alt || '').startsWith(m[3])) return false;
         const cur = attr === 'alt' ? this.alt : attr === 'src' ? this.src : '';
         return cur && cur.includes(val);
       });
@@ -78,3 +80,33 @@ test('SYNC GUARD: browser selector and Node predicate agree on estuary', () => {
   assert.strictEqual(legacy.matches(POSTER_IMG_SELECTOR), true);
   assert.strictEqual(isPosterImage(legacy), true);
 });
+
+// T2477 (gemini-proxy-tools#21): a user's reference attachment is blob: + big enough, and was listed as a poster —
+// `images` showed it as a DALL-E image, every index after it shifted, and the gen count check could pass on it.
+// Fixture copied from the live iagencyaia-market chat 3/10 (alt, src scheme and size as rendered).
+const userAttachment = { alt: 'User attachment', src: 'blob:https://chatgpt.com/c-4832-b757-1762fe3b61a4', naturalWidth: 600, naturalHeight: 600, width: 600, height: 600 };
+const generatedBlob = { alt: 'Generated image 1', src: 'blob:https://chatgpt.com/1-449e-b538-9cdfa1c0271f', naturalWidth: 941, naturalHeight: 1672, width: 941, height: 1672 };
+
+test('T2477: selector and predicate agree a user attachment is NOT a poster (SYNC GUARD stub)', () => {
+  const stubMatches = (img) => POSTER_IMG_SELECTOR.split(',').some((part) => {
+    const m = part.trim().match(/^img\[([^=]+)(?:=?)\*?="?([^"]*)"?\](?::not\(\[alt\^="([^"]*)"\]\))?$/);
+    if (!m) return false;
+    if (m[3] && (img.alt || '').startsWith(m[3])) return false;
+    const cur = m[1].replace('*', '') === 'alt' ? img.alt : img.src;
+    return !!cur && cur.includes(m[2]);
+  });
+  assert.strictEqual(stubMatches(userAttachment), false);
+  assert.strictEqual(stubMatches(generatedBlob), true);
+});
+
+test('T2477: a user attachment is not a poster', () => {
+  assert.strictEqual(isPosterImage(userAttachment), false);
+  assert.strictEqual(isPosterImage(generatedBlob), true);   // control: the generated blob next to it still is
+});
+
+test('T2477: every selector clause excludes user attachments', () => {
+  const clauses = POSTER_IMG_SELECTOR.split(',').map((c) => c.trim());
+  assert.strictEqual(clauses.length, 4);
+  for (const c of clauses) assert.ok(c.endsWith(':not([alt^="User attachment"])'), c);
+});
+
