@@ -110,3 +110,48 @@ test('T2477: every selector clause excludes user attachments', () => {
   for (const c of clauses) assert.ok(c.endsWith(':not([alt^="User attachment"])'), c);
 });
 
+
+// ── T2478: key-based new-image detection (ChatGPT sliding DOM window + reload) ──
+const { posterImageKeys, newestUnseen } = require('./poster-image-matcher');
+
+// Fake DOM: each img sits in a message (msg id) or not (null); src is a per-document blob.
+function withDom(imgs, fn) {
+  const prev = global.document;
+  global.document = { querySelectorAll: () => imgs.map(({ msg, src }) => ({
+    src, closest: () => (msg ? { getAttribute: () => msg } : null) })) };
+  try { return fn(); } finally { global.document = prev; }
+}
+const doc = (msgs, gen) => msgs.map((m) => ({ msg: m, src: `blob:https://chatgpt.com/${gen}-${m}` }));
+// count gate as it was before T2478 (waitForImage: imgCount > lastCount)
+const oldCountGate = (before, after) => after.length > before.length;
+
+test('T2478: sliding window — 6 before, 6 after, newest is new → detected (count gate misses it)', () => {
+  const before = withDom(doc(['m1', 'm2', 'm3', 'm4', 'm5', 'm6'], 'a'), () => posterImageKeys('img'));
+  const after = withDom(doc(['m2', 'm3', 'm4', 'm5', 'm6', 'm7'], 'a'), () => posterImageKeys('img'));   // m1 unmounted, m7 new
+  assert.strictEqual(oldCountGate(before, after), false);   // the regression
+  assert.deepStrictEqual(newestUnseen(after, new Set(before)), { key: 'msg:m7#0', idx: 5 });
+});
+
+test('T2478: reload changes every blob src but not the message ids → no false new image', () => {
+  const before = withDom(doc(['m1', 'm2', 'm3'], 'a'), () => posterImageKeys('img'));
+  const reloaded = withDom(doc(['m1', 'm2', 'm3'], 'b'), () => posterImageKeys('img'));
+  assert.strictEqual(newestUnseen(reloaded, new Set(before)), null);
+});
+
+test('T2478: image landed before a stall-reload is found against the pre-send baseline', () => {
+  const before = withDom(doc(['m1', 'm2'], 'a'), () => posterImageKeys('img'));
+  const reloaded = withDom(doc(['m1', 'm2', 'm3'], 'b'), () => posterImageKeys('img'));
+  assert.strictEqual(newestUnseen(reloaded, new Set(before)).key, 'msg:m3#0');
+});
+
+test('T2478: an older image re-mounting above the newest is not a new image', () => {
+  const before = withDom(doc(['m4', 'm5', 'm6'], 'a'), () => posterImageKeys('img'));
+  const scrolled = withDom(doc(['m3', 'm4', 'm5', 'm6'], 'a'), () => posterImageKeys('img'));   // m3 re-mounts at the top
+  assert.strictEqual(newestUnseen(scrolled, new Set(before)), null);
+});
+
+test('T2478: gallery — second image in the same message gets its own key', () => {
+  const keys = withDom([{ msg: 'm1', src: 'blob:x' }, { msg: 'm1', src: 'blob:y' }, { msg: null, src: 'blob:z' }], () => posterImageKeys('img'));
+  assert.deepStrictEqual(keys, ['msg:m1#0', 'msg:m1#1', 'src:blob:z#0']);
+  assert.strictEqual(newestUnseen([], new Set()), null);
+});
