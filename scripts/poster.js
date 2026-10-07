@@ -10,7 +10,7 @@ const puppeteer = require('puppeteer-core');
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { POSTER_IMG_SELECTOR } = require('./poster-image-matcher');
+const { POSTER_IMG_SELECTOR, posterImageKeys, newestUnseen } = require('./poster-image-matcher');
 
 // ── T4: Config from file ──
 const CONFIG_PATH = path.join(__dirname, 'poster.config.json');
@@ -21,6 +21,8 @@ const defaults = {
   downloads_dir: '/mnt/c/Users/mbank/Downloads',
   cdp_url: 'http://localhost:9222',
   cdp_protocol_timeout: 120000,
+  tab_call_timeout_ms: 30000,   // T2753: one silent window on the chat tab before TAB BUSY (busy hidden tab ≥30 s)
+  tab_busy_windows: 3,          // T2753: silent windows before giving up with TabBusyError
   generation_timeout_ms: 180000,
   poll_interval_ms: 5000,
   stall_threshold_polls: 6,
@@ -245,6 +247,10 @@ const REFUSAL_PATTERNS = [
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// T2753: per-call bound on the chat tab (TAB BUSY windows, never re-issue a call) — scripts/tab-guard.js
+const { TabBusyError, guardTab: guardTabWith } = require('./tab-guard');
+const guardTab = (page) => guardTabWith(page, { windowMs: cfg.tab_call_timeout_ms, windows: cfg.tab_busy_windows });
+
 // ── T5: Heartbeat ──
 function heartbeat(taskId, pct, status) {
   // GR#9 canonical stamp: YYYY-MM-DD HH:MM:SS, Bangkok LOCAL wall-clock.
@@ -336,14 +342,14 @@ async function connect() {
     page = chatgptPage;
   }
 
-  return { browser, page };
+  return { browser, page: guardTab(page) };
 }
 
 async function connectAnyChatgptTab() {
   const browser = await puppeteer.connect({ browserURL: cfg.cdp_url, defaultViewport: null, protocolTimeout: cfg.cdp_protocol_timeout });
   const page = (await browser.pages()).find(p => p.url().includes('chatgpt.com'));
   if (!page) throw new Error(`🚫 CONNECT FAILED: No ChatGPT tab open in browser. Open ONE https://chatgpt.com/ tab, then retry.`);
-  return { browser, page };
+  return { browser, page: guardTab(page) };
 }
 
 async function cleanupCreatedPages() {
@@ -410,32 +416,18 @@ async function rollBrandChat(page) {
 // ── T9: Verify image belongs to THIS prompt's assistant message ──
 // T1203: ChatGPT removed data-message-author-role from DOM (nobi found on Dreams 2026-09-01).
 // Primary path: scoped assistant-message check. Fallback: pure count-based (estuary direct-poll).
-async function verifyImageGeneration(page, promptText, beforeCount) {
-  return page.evaluate((prompt, before, imgSel) => {
-    // T1203 fallback selectors — try data-message-author-role first, then alternatives
-    const assistantMsgs =
-      document.querySelectorAll('[data-message-author-role="assistant"]');
-    const scopedMsgs = assistantMsgs.length
-      ? assistantMsgs
-      : document.querySelectorAll('[data-testid^="conversation-turn-"],[data-message-id]');
+async function readImageKeys(page) {
+  return page.evaluate(posterImageKeys, POSTER_IMG_SELECTOR);
+}
 
-    const allImgs = document.querySelectorAll(imgSel);
-    if (allImgs.length <= before) {
-      return { valid: false, reason: `total count ${allImgs.length} not greater than baseline ${before}` };
-    }
-
-    // If we have scoped messages, verify the last one contains an image
-    if (scopedMsgs.length) {
-      const lastMsg = scopedMsgs[scopedMsgs.length - 1];
-      const msgImages = lastMsg.querySelectorAll(imgSel);
-      if (msgImages.length > 0) {
-        return { valid: true, imgCount: msgImages.length, totalCount: allImgs.length, method: 'scoped' };
-      }
-    }
-
-    // T1203 fallback: count increased → image was generated (estuary direct-poll)
-    return { valid: true, imgCount: allImgs.length - before, totalCount: allImgs.length, method: 'count-fallback' };
-  }, promptText, beforeCount, POSTER_IMG_SELECTOR);
+// T2478: was a count check (total > baseline) plus a scoped path that is dead in today's DOM (0 author-role/turn
+// nodes, #21). ChatGPT's sliding window keeps the count flat when a new image arrives (6 before = 6 after), so the
+// count said "previous generation" → retry → duplicate gen. Now: the newest image's key is not in the pre-send baseline.
+async function verifyImageGeneration(page, baselineKeys) {
+  const keys = await readImageKeys(page);
+  const hit = newestUnseen(keys, baselineKeys);
+  return hit ? { valid: true, idx: hit.idx, key: hit.key, totalCount: keys.length, method: 'key' }
+             : { valid: false, reason: `newest image ${keys.length ? keys[keys.length - 1] : '(none)'} was already there before the send` };
 }
 
 // ── Auto-resize to 1080x1920 (IG Story) — pad on brand canvas, never distort ──
@@ -969,6 +961,9 @@ async function waitForImage(page, taskId, timeoutMs, opts) {
     lastCount = await getImageCount(page);
   }
 
+  // T2478: detection = the newest image's key is not in the baseline (taken before the send by the caller; the
+  // standalone `wait` command passes none, so "now" is its baseline as before). The count only drives the stall check.
+  const baselineKeys = opts.baseline || new Set(await readImageKeys(page));
   let stallPolls = 0;
   let lastMsgText = '';
   let pollNum = 0;
@@ -998,8 +993,9 @@ async function waitForImage(page, taskId, timeoutMs, opts) {
       return { imgCount: imgs.length, isThinking: !!thinking };
     }, POSTER_IMG_SELECTOR);
 
-    if (status.imgCount > lastCount) {
-      console.log(`\nImage generated! (${elapsed}s)`);
+    const hit = newestUnseen(await readImageKeys(page), baselineKeys);
+    if (hit) {
+      console.log(`\nImage generated! (${elapsed}s, ${hit.key.slice(0, 16)}…)`);
       heartbeat(taskId || '#13', 95, 'image-detected');
       return { ok: true };
     }
@@ -1017,7 +1013,7 @@ async function waitForImage(page, taskId, timeoutMs, opts) {
     }
 
     // T1: Stall detection — flat count for too long
-    if (status.imgCount === lastCount && !status.isThinking && elapsed > 30) {
+    if (!status.isThinking && elapsed > 30) {   // reaching here = no new key (a flat OR shifted count is not progress)
       stallPolls++;
     } else {
       stallPolls = 0;
@@ -1248,12 +1244,17 @@ async function generate(page, type, brief, taskId) {
       .replace('{SOURCE}', baseBrand(BRAND_FLAG) === 'wealthbanks' ? 'wealthbanks.net' : 'iAgencyAIA');
   }
 
+  // T2478: keys taken ONCE, before the first send, and kept across retries — they survive a reload, so after a
+  // stall-refresh an image that landed while the count looked flat is found instead of being generated again.
+  let baselineKeys = null;
+  let lastStalled = false;
   for (let attempt = 0; attempt <= cfg.max_retries; attempt++) {
     if (attempt > 0) {
       console.log(`\nRetry ${attempt}/${cfg.max_retries}...`);
     }
 
     const beforeCount = (await listImages(page)).length;
+    if (!baselineKeys) baselineKeys = new Set(await readImageKeys(page));
     console.log(`Generating ${type} poster (attempt ${attempt + 1}, baseline: ${beforeCount} images)...`);
     // chat id first: the T599 abort below logs it (it used to be declared after, so every block crashed with a TDZ
     // ReferenceError, the BLOCKED feed line was never written and exit 4 became 1 — T2406 30/9)
@@ -1267,22 +1268,35 @@ async function generate(page, type, brief, taskId) {
       process.exitCode = 4;
       return null;
     }
-    // SAFEGUARD: log chat_id + prompt_hash before every send
-    logToFeed(chatId, promptHash(prompt), `gen:${type}`);
-    const sent = await sendPrompt(page, prompt);
-    if (!sent) return null;
+    // T2478: after a stall-refresh, look for the image before re-sending (the reloaded page mounts its messages lazily)
+    let landed = null;
+    if (lastStalled) {
+      for (let i = 0; i < 8 && !landed; i++) { await sleep(2000); landed = newestUnseen(await readImageKeys(page), baselineKeys); }
+      console.log(landed ? `Image had already landed (${landed.key.slice(0, 16)}…) — not re-sending` : 'No new image after reload — re-sending');
+    }
+    let result;
+    if (landed) {
+      result = { ok: true };
+    } else {
+      // SAFEGUARD: log chat_id + prompt_hash before every send
+      logToFeed(chatId, promptHash(prompt), `gen:${type}`);
+      const sent = await sendPrompt(page, prompt);
+      if (!sent) return null;
 
-    // T9: after refresh/retry, stabilize baseline
-    const stabilize = attempt > 0;
-    const result = await waitForImage(page, taskId, null, { stabilize });
+      // T9: after refresh/retry, stabilize baseline
+      const stabilize = attempt > 0;
+      result = await waitForImage(page, taskId, null, { stabilize, baseline: baselineKeys });
+    }
+    lastStalled = !!result.stalled;
 
     if (result.ok) {
       // T9: Verify image is from THIS prompt's response
-      const verification = await verifyImageGeneration(page, prompt, beforeCount);
+      const verification = await verifyImageGeneration(page, baselineKeys);
       if (!verification.valid) {
         console.log(`\nT9 MISMATCH: ${verification.reason}`);
         if (attempt < cfg.max_retries) {
           console.log('Image belongs to previous generation — retrying...');
+          lastStalled = true;   // T2478: look for a late-mounting image before re-sending, same as after a stall
           heartbeat(taskId || '#13', 50, 'T9-mismatch-retry');
           continue;
         }
@@ -1291,8 +1305,7 @@ async function generate(page, type, brief, taskId) {
         return null;
       }
 
-      const afterImgs = await listImages(page);
-      const newIdx = afterImgs.length - 1;
+      const newIdx = verification.idx;   // T2478: the image the key check found (same index space as listImages)
       console.log(`\nAuto-downloading image [${newIdx}] (verified: from this prompt)...`);
       const dest = await downloadImage(page, type, newIdx);
 
@@ -1377,7 +1390,7 @@ async function newChat(page, rawBrandName) {
     console.log('[new-chat] POSTER_ONE_TAB=1: reusing the existing ChatGPT tab (no new tab)');
   } else {
     // Open a NEW tab — bypass connect() which reuses existing ChatGPT tab
-    newPage = await page.browser().newPage();
+    newPage = guardTab(await page.browser().newPage());   // T2753
     _createdPages.push(newPage);
   }
   const dropPage = async () => { if (!oneTab) await newPage.close(); };   // never close the one shared tab
@@ -1567,8 +1580,15 @@ Examples:
       execSync(`bash "${ensureScript}"`, { stdio: 'inherit', timeout: 30000 });
     } catch (e) {
       const code = e.status || 1;
-      console.error(`🚫 T1097 SESSION GATE FAILED (exit ${code}): ChatGPT session not healthy.`);
-      console.error('   Fix: re-login to ChatGPT in แบงค์\'s Chrome, then retry.');
+      if (code === 3) {
+        // T2753: exit 3 = TAB BUSY (the tab's page thread did not answer; cookies were not the problem) — never re-login
+        console.error(`⏳ TAB BUSY (session gate exit 3): the ChatGPT tab is busy, the session is fine. Retry in a minute.`);
+      } else if (code === 2) {
+        console.error(`🚫 T1097 SESSION GATE (exit 2): CDP :9222 unreadable — cannot check the session. Check Chrome/CDP, then retry.`);
+      } else {
+        console.error(`🚫 T1097 SESSION GATE FAILED (exit ${code}): ChatGPT session not healthy.`);
+        console.error('   Fix: re-login to ChatGPT in แบงค์\'s Chrome, then retry.');
+      }
       process.exitCode = code;
       return;
     }
@@ -1662,4 +1682,8 @@ process.on('SIGTERM', async () => { await cleanupCreatedPages(); process.exit(14
 
 main()
   .then(() => process.exit(process.exitCode || 0))
-  .catch(e => { console.error('ERROR:', e.message); process.exit(1); });
+  .catch(async e => {
+    // T2753: a busy tab is its own exit (4) so a caller can retry instead of reading it as a broken session
+    if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(4); }
+    console.error('ERROR:', e.message); process.exit(1);
+  });
