@@ -21,6 +21,8 @@ const defaults = {
   downloads_dir: '/mnt/c/Users/mbank/Downloads',
   cdp_url: 'http://localhost:9222',
   cdp_protocol_timeout: 120000,
+  tab_call_timeout_ms: 30000,   // T2753: one silent window on the chat tab before TAB BUSY (busy hidden tab ≥30 s)
+  tab_busy_windows: 3,          // T2753: silent windows before giving up with TabBusyError
   generation_timeout_ms: 180000,
   poll_interval_ms: 5000,
   stall_threshold_polls: 6,
@@ -245,6 +247,10 @@ const REFUSAL_PATTERNS = [
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// T2753: per-call bound on the chat tab (TAB BUSY windows, never re-issue a call) — scripts/tab-guard.js
+const { TabBusyError, guardTab: guardTabWith } = require('./tab-guard');
+const guardTab = (page) => guardTabWith(page, { windowMs: cfg.tab_call_timeout_ms, windows: cfg.tab_busy_windows });
+
 // ── T5: Heartbeat ──
 function heartbeat(taskId, pct, status) {
   // GR#9 canonical stamp: YYYY-MM-DD HH:MM:SS, Bangkok LOCAL wall-clock.
@@ -336,14 +342,14 @@ async function connect() {
     page = chatgptPage;
   }
 
-  return { browser, page };
+  return { browser, page: guardTab(page) };
 }
 
 async function connectAnyChatgptTab() {
   const browser = await puppeteer.connect({ browserURL: cfg.cdp_url, defaultViewport: null, protocolTimeout: cfg.cdp_protocol_timeout });
   const page = (await browser.pages()).find(p => p.url().includes('chatgpt.com'));
   if (!page) throw new Error(`🚫 CONNECT FAILED: No ChatGPT tab open in browser. Open ONE https://chatgpt.com/ tab, then retry.`);
-  return { browser, page };
+  return { browser, page: guardTab(page) };
 }
 
 async function cleanupCreatedPages() {
@@ -1384,7 +1390,7 @@ async function newChat(page, rawBrandName) {
     console.log('[new-chat] POSTER_ONE_TAB=1: reusing the existing ChatGPT tab (no new tab)');
   } else {
     // Open a NEW tab — bypass connect() which reuses existing ChatGPT tab
-    newPage = await page.browser().newPage();
+    newPage = guardTab(await page.browser().newPage());   // T2753
     _createdPages.push(newPage);
   }
   const dropPage = async () => { if (!oneTab) await newPage.close(); };   // never close the one shared tab
@@ -1574,8 +1580,15 @@ Examples:
       execSync(`bash "${ensureScript}"`, { stdio: 'inherit', timeout: 30000 });
     } catch (e) {
       const code = e.status || 1;
-      console.error(`🚫 T1097 SESSION GATE FAILED (exit ${code}): ChatGPT session not healthy.`);
-      console.error('   Fix: re-login to ChatGPT in แบงค์\'s Chrome, then retry.');
+      if (code === 3) {
+        // T2753: exit 3 = TAB BUSY (the tab's page thread did not answer; cookies were not the problem) — never re-login
+        console.error(`⏳ TAB BUSY (session gate exit 3): the ChatGPT tab is busy, the session is fine. Retry in a minute.`);
+      } else if (code === 2) {
+        console.error(`🚫 T1097 SESSION GATE (exit 2): CDP :9222 unreadable — cannot check the session. Check Chrome/CDP, then retry.`);
+      } else {
+        console.error(`🚫 T1097 SESSION GATE FAILED (exit ${code}): ChatGPT session not healthy.`);
+        console.error('   Fix: re-login to ChatGPT in แบงค์\'s Chrome, then retry.');
+      }
       process.exitCode = code;
       return;
     }
@@ -1669,4 +1682,8 @@ process.on('SIGTERM', async () => { await cleanupCreatedPages(); process.exit(14
 
 main()
   .then(() => process.exit(process.exitCode || 0))
-  .catch(e => { console.error('ERROR:', e.message); process.exit(1); });
+  .catch(async e => {
+    // T2753: a busy tab is its own exit (4) so a caller can retry instead of reading it as a broken session
+    if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(4); }
+    console.error('ERROR:', e.message); process.exit(1);
+  });
