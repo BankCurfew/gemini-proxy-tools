@@ -249,6 +249,7 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // T2753: per-call bound on the chat tab (TAB BUSY windows, never re-issue a call) — scripts/tab-guard.js
 const { TabBusyError, guardTab: guardTabWith } = require('./tab-guard');
+const EXIT_TAB_BUSY = 75;   // T2753: exit codes — 1 error · 2 refused · 3 wrong image · 4 T599 brand ABORT · 75 TAB BUSY (retry)
 const guardTab = (page) => guardTabWith(page, { windowMs: cfg.tab_call_timeout_ms, windows: cfg.tab_busy_windows });
 
 // ── T5: Heartbeat ──
@@ -1683,7 +1684,8 @@ process.on('SIGTERM', async () => { await cleanupCreatedPages(); process.exit(14
 main()
   .then(() => process.exit(process.exitCode || 0))
   .catch(async e => {
-    // T2753: a busy tab is its own exit (4) so a caller can retry instead of reading it as a broken session
-    if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(4); }
+    // T2753: a busy tab is its own exit so a caller can retry instead of reading it as a broken session.
+    // 75 = EX_TEMPFAIL ("try again later"); 4 is taken by the T599 cross-brand ABORT (bob 7 Oct, designer caught it).
+    if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(EXIT_TAB_BUSY); }
     console.error('ERROR:', e.message); process.exit(1);
   });

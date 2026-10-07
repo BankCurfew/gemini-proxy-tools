@@ -71,6 +71,11 @@ const check = (name, ok, detail) => { results.push(ok); console.log(`${ok ? 'PAS
     browser.disconnect();
     try { fs.unlinkSync(log); } catch {}
   }
+  // 6. exit code: TAB BUSY has its own code (75), not 4 (= T599 cross-brand ABORT), and 75 means nothing else
+  const src = fs.readFileSync(path.join(__dirname, '../scripts/poster.js'), 'utf8');
+  check('TAB BUSY exits 75 (EX_TEMPFAIL)', /const EXIT_TAB_BUSY = 75;/.test(src) && /TabBusyError\)[^\n]*process\.exit\(EXIT_TAB_BUSY\)/.test(src));
+  check('75 used for nothing else', !/exit(Code\s*=\s*|\()75\b/.test(src));
+  check('TabBusyError path no longer exits 4', !/TabBusyError\)[^\n]*process\.exit\(4\)/.test(src));
   const ok = results.every(Boolean);
   console.log(`${results.filter(Boolean).length}/${results.length} ${ok ? 'PASS' : 'FAIL'}`);
   process.exit(ok ? 0 : 1);
