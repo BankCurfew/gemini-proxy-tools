@@ -748,9 +748,8 @@ async function browserPath(page, f) {
   try { return execSync(`wslpath -w ${JSON.stringify(f)}`, { encoding: 'utf-8' }).trim(); } catch { return f; }
 }
 
-// Success = one 200 from /backend-api/files/process_upload_stream per file (the upload finished server-side), OR
-// (T2753, endpoint renamed) chips present + Send enabled + no "Upload failed" held 2 s.
-// The "Remove <file>" button alone is NOT a success signal: it renders on a failed chip too.
+// Success = one 200 from /backend-api/files/process_upload_stream per file (the upload finished server-side).
+// The "Remove <file>" button is NOT a success signal: it renders on a failed chip too.
 async function attachFiles(page, files) {
   const input = await page.$('form input[type="file"][accept="image/*"]') || await page.$('form input[type="file"]');
   if (!input) { console.error('🚫 attach: no file input in the composer'); return false; }
@@ -762,26 +761,17 @@ async function attachFiles(page, files) {
     for (const f of files) paths.push(await browserPath(page, f));
     await input.uploadFile(...paths);
     const names = files.map((f) => path.basename(f));
-    const t0 = Date.now(), deadline = t0 + 60000;
-    let readyStreak = 0, viaDom = false;
+    const deadline = Date.now() + 60000;
     while (Date.now() < deadline) {
-      const st = await page.evaluate(() => {
+      const failed = await page.evaluate(() => {
         const box = document.querySelector('[data-composer-attachments]');
-        const b = document.querySelector('button[data-testid="send-button"], button[data-testid="composer-send-button"], '
-          + 'button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Send"]');
-        return { failed: !!box && /Upload failed/i.test(box.innerText || ''), chips: !!box, send: b ? !b.disabled : false };
+        return !!box && /Upload failed/i.test(box.innerText || '');
       });
-      if (st.failed) { console.error(`🚫 attach: ChatGPT shows "Upload failed" for ${names.join(', ')}`); return false; }
+      if (failed) { console.error(`🚫 attach: ChatGPT shows "Upload failed" for ${names.join(', ')}`); return false; }
       if (processed >= files.length) break;
-      // designer 7 Oct 15:3x: the upload endpoint no longer answers as process_upload_stream (0/1 printed while the
-      // composer held good chips and the prompt then sent). ChatGPT keeps Send disabled while a chip uploads, so
-      // chips + Send enabled + no "Upload failed", held for 2 s (and ≥3 s after the pick), is success from the page.
-      readyStreak = st.chips && st.send && Date.now() - t0 >= 3000 ? readyStreak + 1 : 0;
-      if (readyStreak >= 4) { viaDom = true; break; }
       await sleep(500);
     }
-    if (processed < files.length && !viaDom) { console.error(`🚫 attach: ${processed}/${files.length} uploads finished after 60s (no chip ready, Send never enabled)`); return false; }
-    if (viaDom) console.log(`[attach] ready by page state (chips + Send enabled, no "Upload failed"); upload responses seen ${processed}/${files.length}`);
+    if (processed < files.length) { console.error(`🚫 attach: ${processed}/${files.length} uploads finished after 60s`); return false; }
     for (const n of names) console.log(`[attach] uploaded ${n}`);
     return true;
   } finally { page.off('response', onRes); }
