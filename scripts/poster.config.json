@@ -117,6 +117,15 @@
       "created": "2026-10-06",
       "set_by": "designer (bob ok 19:45; created with BoB ψ/lab/t2301/create-series.mjs)",
       "note": "ONE chat for น้องวิง mascot renders (emotion set, poses); not posters, no poster gates"
+    },
+    "iagencyaia-trip": {
+      "chat_id": "6ac59e95-1b28-83ec-b41d-e43049e3d293",
+      "base_brand": "iagencyaia",
+      "title": "TRIP · 2026-10 · Austria live guide",
+      "project": "iAgencyAIA",
+      "created": "2026-10-07",
+      "set_by": "designer T2709 (bob order: day images via ChatGPT; created with BoB ψ/lab/t2301/create-series.mjs)",
+      "note": "ONE chat for the 13 Austria trip day images; no text in images"
     }
   },
   "archived": {
