@@ -21,6 +21,8 @@ const defaults = {
   downloads_dir: '/mnt/c/Users/mbank/Downloads',
   cdp_url: 'http://localhost:9222',
   cdp_protocol_timeout: 120000,
+  tab_call_timeout_ms: 30000,   // T2753: one silent window on the chat tab before TAB BUSY (busy hidden tab ≥30 s)
+  tab_busy_windows: 3,          // T2753: silent windows before giving up with TabBusyError
   generation_timeout_ms: 180000,
   poll_interval_ms: 5000,
   stall_threshold_polls: 6,
@@ -245,6 +247,10 @@ const REFUSAL_PATTERNS = [
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// T2753: per-call bound on the chat tab (TAB BUSY windows, never re-issue a call) — scripts/tab-guard.js
+const { TabBusyError, guardTab: guardTabWith } = require('./tab-guard');
+const guardTab = (page) => guardTabWith(page, { windowMs: cfg.tab_call_timeout_ms, windows: cfg.tab_busy_windows });
+
 // ── T5: Heartbeat ──
 function heartbeat(taskId, pct, status) {
   // GR#9 canonical stamp: YYYY-MM-DD HH:MM:SS, Bangkok LOCAL wall-clock.
@@ -336,14 +342,14 @@ async function connect() {
     page = chatgptPage;
   }
 
-  return { browser, page };
+  return { browser, page: guardTab(page) };
 }
 
 async function connectAnyChatgptTab() {
   const browser = await puppeteer.connect({ browserURL: cfg.cdp_url, defaultViewport: null, protocolTimeout: cfg.cdp_protocol_timeout });
   const page = (await browser.pages()).find(p => p.url().includes('chatgpt.com'));
   if (!page) throw new Error(`🚫 CONNECT FAILED: No ChatGPT tab open in browser. Open ONE https://chatgpt.com/ tab, then retry.`);
-  return { browser, page };
+  return { browser, page: guardTab(page) };
 }
 
 async function cleanupCreatedPages() {
@@ -742,8 +748,9 @@ async function browserPath(page, f) {
   try { return execSync(`wslpath -w ${JSON.stringify(f)}`, { encoding: 'utf-8' }).trim(); } catch { return f; }
 }
 
-// Success = one 200 from /backend-api/files/process_upload_stream per file (the upload finished server-side).
-// The "Remove <file>" button is NOT a success signal: it renders on a failed chip too.
+// Success = one 200 from /backend-api/files/process_upload_stream per file (the upload finished server-side), OR
+// (T2753, endpoint renamed) chips present + Send enabled + no "Upload failed" held 2 s.
+// The "Remove <file>" button alone is NOT a success signal: it renders on a failed chip too.
 async function attachFiles(page, files) {
   const input = await page.$('form input[type="file"][accept="image/*"]') || await page.$('form input[type="file"]');
   if (!input) { console.error('🚫 attach: no file input in the composer'); return false; }
@@ -755,17 +762,26 @@ async function attachFiles(page, files) {
     for (const f of files) paths.push(await browserPath(page, f));
     await input.uploadFile(...paths);
     const names = files.map((f) => path.basename(f));
-    const deadline = Date.now() + 60000;
+    const t0 = Date.now(), deadline = t0 + 60000;
+    let readyStreak = 0, viaDom = false;
     while (Date.now() < deadline) {
-      const failed = await page.evaluate(() => {
+      const st = await page.evaluate(() => {
         const box = document.querySelector('[data-composer-attachments]');
-        return !!box && /Upload failed/i.test(box.innerText || '');
+        const b = document.querySelector('button[data-testid="send-button"], button[data-testid="composer-send-button"], '
+          + 'button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Send"]');
+        return { failed: !!box && /Upload failed/i.test(box.innerText || ''), chips: !!box, send: b ? !b.disabled : false };
       });
-      if (failed) { console.error(`🚫 attach: ChatGPT shows "Upload failed" for ${names.join(', ')}`); return false; }
+      if (st.failed) { console.error(`🚫 attach: ChatGPT shows "Upload failed" for ${names.join(', ')}`); return false; }
       if (processed >= files.length) break;
+      // designer 7 Oct 15:3x: the upload endpoint no longer answers as process_upload_stream (0/1 printed while the
+      // composer held good chips and the prompt then sent). ChatGPT keeps Send disabled while a chip uploads, so
+      // chips + Send enabled + no "Upload failed", held for 2 s (and ≥3 s after the pick), is success from the page.
+      readyStreak = st.chips && st.send && Date.now() - t0 >= 3000 ? readyStreak + 1 : 0;
+      if (readyStreak >= 4) { viaDom = true; break; }
       await sleep(500);
     }
-    if (processed < files.length) { console.error(`🚫 attach: ${processed}/${files.length} uploads finished after 60s`); return false; }
+    if (processed < files.length && !viaDom) { console.error(`🚫 attach: ${processed}/${files.length} uploads finished after 60s (no chip ready, Send never enabled)`); return false; }
+    if (viaDom) console.log(`[attach] ready by page state (chips + Send enabled, no "Upload failed"); upload responses seen ${processed}/${files.length}`);
     for (const n of names) console.log(`[attach] uploaded ${n}`);
     return true;
   } finally { page.off('response', onRes); }
@@ -1384,7 +1400,7 @@ async function newChat(page, rawBrandName) {
     console.log('[new-chat] POSTER_ONE_TAB=1: reusing the existing ChatGPT tab (no new tab)');
   } else {
     // Open a NEW tab — bypass connect() which reuses existing ChatGPT tab
-    newPage = await page.browser().newPage();
+    newPage = guardTab(await page.browser().newPage());   // T2753
     _createdPages.push(newPage);
   }
   const dropPage = async () => { if (!oneTab) await newPage.close(); };   // never close the one shared tab
@@ -1574,8 +1590,15 @@ Examples:
       execSync(`bash "${ensureScript}"`, { stdio: 'inherit', timeout: 30000 });
     } catch (e) {
       const code = e.status || 1;
-      console.error(`🚫 T1097 SESSION GATE FAILED (exit ${code}): ChatGPT session not healthy.`);
-      console.error('   Fix: re-login to ChatGPT in แบงค์\'s Chrome, then retry.');
+      if (code === 3) {
+        // T2753: exit 3 = TAB BUSY (the tab's page thread did not answer; cookies were not the problem) — never re-login
+        console.error(`⏳ TAB BUSY (session gate exit 3): the ChatGPT tab is busy, the session is fine. Retry in a minute.`);
+      } else if (code === 2) {
+        console.error(`🚫 T1097 SESSION GATE (exit 2): CDP :9222 unreadable — cannot check the session. Check Chrome/CDP, then retry.`);
+      } else {
+        console.error(`🚫 T1097 SESSION GATE FAILED (exit ${code}): ChatGPT session not healthy.`);
+        console.error('   Fix: re-login to ChatGPT in แบงค์\'s Chrome, then retry.');
+      }
       process.exitCode = code;
       return;
     }
@@ -1669,4 +1692,8 @@ process.on('SIGTERM', async () => { await cleanupCreatedPages(); process.exit(14
 
 main()
   .then(() => process.exit(process.exitCode || 0))
-  .catch(e => { console.error('ERROR:', e.message); process.exit(1); });
+  .catch(async e => {
+    // T2753: a busy tab is its own exit (4) so a caller can retry instead of reading it as a broken session
+    if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(4); }
+    console.error('ERROR:', e.message); process.exit(1);
+  });
