@@ -92,11 +92,14 @@ const DRY_RUN = process.argv.includes('--dry-run');
 const BRAND_FORBID = {
   iagencyaia: ['wealthbanks', 'prestige white', 'wealth-bank', 'wealthbanks.net', 'wb-'],
   wealthbanks: ['iagencyaia', 'iagency', 'i-agency', '@iagencyaia', 'd31145', 'c8102e', 'discord', '@iagency'],
+  // T2775 (แบงค์ order via bob, designer's list): น้อง We / WeWealth Advisory — no iAgency, no AIA red, no WealthBanks, no วิง
+  wewealth: ['iagency', '@iagencyaia', 'd31145', 'c8102e', 'wealthbanks', 'น้องวิง', 'วิงแซ่บ'],
 };
 // Canonical brand name each slug must self-declare in a composed prompt.
 const BRAND_SELF_NAME = {
   iagencyaia: 'iAgencyAIA',
   wealthbanks: 'WealthBanks',
+  wewealth: 'WeWealth',
 };
 // Destination → the ONLY permitted brand. Enforced by callers choosing --brand.
 const DESTINATION_BRAND = {
@@ -1376,6 +1379,35 @@ async function status(page) {
   console.log(`DALL-E images: ${info.imageCount}/${max} (${pct}%)${info.imageCount >= max ? ' ⚠️ ROTATE NEEDED' : ''}`);
 }
 
+// T2775: set a brand chat's ChatGPT title from brands.<slug>.title. API only, in whatever ChatGPT tab is open: no
+// navigation, no message sent. Success = the title read back from the server equals the config title.
+async function renameChat(page, slug) {
+  const b = cfg.brands && cfg.brands[slug];
+  if (!b || !b.chat_id) throw new Error(`rename: brand "${slug}" has no chat_id in config`);
+  const want = typeof b.title === 'string' ? b.title.trim() : '';
+  if (!want) throw new Error(`rename: brands.${slug}.title is empty — set the title in poster.config.json first`);
+  const r = await page.evaluate(async ([id, title]) => {
+    try {
+      const s = await (await fetch('/api/auth/session')).json();
+      if (!s || !s.accessToken) return { error: 'no ChatGPT session in this tab (logged out?)' };
+      const H = { Authorization: 'Bearer ' + s.accessToken, 'Content-Type': 'application/json' };
+      const get = async () => { const g = await fetch('/backend-api/conversation/' + id, { headers: H }); return { status: g.status, j: g.ok ? await g.json() : null }; };
+      const before = await get();
+      if (!before.j) return { error: `chat ${id} not readable (HTTP ${before.status})` };
+      if (before.j.is_temporary_chat) return { error: `chat ${id} is a temporary chat` };
+      if (before.j.title === title) return { before: before.j.title, after: before.j.title, patch: null };
+      const pr = await fetch('/backend-api/conversation/' + id, { method: 'PATCH', headers: H, body: JSON.stringify({ title }) });
+      await new Promise((ok) => setTimeout(ok, 1500));
+      const after = await get();
+      return { before: before.j.title, after: after.j && after.j.title, patch: pr.status };
+    } catch (e) { return { error: e.message }; }
+  }, [b.chat_id, want]);
+  if (r.error) throw new Error(`rename: ${r.error}`);
+  const ok = r.after === want;
+  console.log(JSON.stringify({ brand: slug, chat_id: b.chat_id, before: r.before, after: r.after, patch: r.patch, ok }));
+  if (!ok) throw new Error(`rename: title read back "${r.after}" ≠ config "${want}" (PATCH ${r.patch})`);
+}
+
 async function newChat(page, rawBrandName) {
   const brandName = rawBrandName.toLowerCase();
   console.log(`[new-chat] Creating new ChatGPT chat for brand: ${brandName}`);
@@ -1518,6 +1550,7 @@ Commands:
   status              Check ChatGPT tab status + image count
   generate <type> <brief>  Generate poster (--brand required)
   new-chat --brand <name>  Create new ChatGPT chat for brand + save chat_id
+  rename --brand <name>    Set that chat's ChatGPT title to brands.<name>.title (API only, no navigation)
   prompt <text>       Send raw prompt to ChatGPT (--brand required)
   wait [taskId]       Wait for current generation (with heartbeat)
   download [prefix] [index]  Download image by index (default: latest)
@@ -1597,7 +1630,8 @@ Examples:
 
   // T2406: new-chat creates the brand, so it cannot resolve the brand's chat first (connect() exits for an unknown brand).
   // It attaches to the one existing ChatGPT tab instead; newChat() navigates that tab to a fresh chat.
-  const { browser, page } = cmd === 'new-chat' ? await connectAnyChatgptTab() : await connect();
+  // T2775: rename is API-only, so it also runs in whatever ChatGPT tab is open (never navigates it)
+  const { browser, page } = (cmd === 'new-chat' || cmd === 'rename') ? await connectAnyChatgptTab() : await connect();
 
   try {
     switch (cmd) {
@@ -1657,6 +1691,9 @@ Examples:
         break;
       case 'roll-brand': case 'rotate':
         await rollBrandChat(page);
+        break;
+      case 'rename':
+        await renameChat(page, BRAND_FLAG);
         break;
       case 'new-chat': {
         const brandName = BRAND_FLAG || args[0];

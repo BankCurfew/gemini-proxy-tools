@@ -126,6 +126,14 @@
       "created": "2026-10-07",
       "set_by": "designer T2709 (bob order: day images via ChatGPT; created with BoB ψ/lab/t2301/create-series.mjs)",
       "note": "ONE chat for the 13 Austria trip day images; no text in images"
+    },
+    "wewealth-mascot": {
+      "chat_id": "6ac6533b-3f84-83ec-ab94-7346537afce0",
+      "created": "2026-10-07T14:12:15.644Z",
+      "base_brand": "wewealth",
+      "title": "MASCOT-WE · 2026-10",
+      "set_by": "designer (bob order 21:0x, แบงค์: separate chat from วิง)",
+      "note": "ONE chat for น้อง We (WeWealth Advisory) renders; never วิง/iAgencyAIA in this chat"
     }
   },
   "archived": {
