@@ -657,6 +657,13 @@ async function sendAndConfirm(page, text, opts = {}) {
   const first = await sendOnce(page, text, opts);
   if (first === 'confirmed') return true;
   if (first === 'no-composer-text') return false; // read-back refused: nothing was sent, retrying would not help
+  // T2790 (bob GO): Send stayed disabled on a tab that ALREADY went silent in this run (TAB BUSY windows) = a stalled tab,
+  // not the T2398 local 'still writing' state. Reload + resend there made it worse (S1 8 Oct: reload never finished,
+  // 'no visible composer', 'id unreadable'). Fail loud with exit 75: nothing was sent, the draft stays in the composer and
+  // the next run clears + refills it (fillComposer), so a retry can never double-send.
+  if (first === 'send-disabled' && (page.__tabSilentWindows || 0) > 0) {
+    throw new TabBusyError(`TAB BUSY: tab stalled in this run (${page.__tabSilentWindows} silent window(s)) and Send stayed disabled — NOT reloading/resending; nothing was sent, retry later`);
+  }
   // T2398: a tab can be stuck in a local "ChatGPT is still writing" state (send refused, no new turn). Reload, wait
   // until the chat is ready, and only resend if our message is NOT already the newest user turn (never double-send).
   console.error(`[${label}] retrying once after reload (${first})`);
@@ -1718,11 +1725,12 @@ Examples:
 process.on('SIGINT', async () => { await cleanupCreatedPages(); process.exit(130); });
 process.on('SIGTERM', async () => { await cleanupCreatedPages(); process.exit(143); });
 
-main()
+if (require.main === module) main()
   .then(() => process.exit(process.exitCode || 0))
   .catch(async e => {
     // T2753: a busy tab is its own exit so a caller can retry instead of reading it as a broken session.
     // 75 = EX_TEMPFAIL ("try again later"); 4 is taken by the T599 cross-brand ABORT (bob 7 Oct, designer caught it).
     if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(EXIT_TAB_BUSY); }
     console.error('ERROR:', e.message); process.exit(1);
-  });
+  });   // T2790: requirable by test/t2790-stalled-send.test.js
+module.exports = { sendAndConfirm, installComposerFinder };

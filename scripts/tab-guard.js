@@ -31,6 +31,7 @@ async function boundedTabCall(page, label, run, windowMs, windows) {
       return r;
     }
     const s = (Date.now() - t0) / 1000;
+    page.__tabSilentWindows = (page.__tabSilentWindows || 0) + 1;   // T2790: callers ask "did this tab stall in this run?"
     console.error(`⏳ TAB BUSY: ChatGPT tab ${tabId(page)} did not answer ${label} in ${s.toFixed(0)}s — waiting (${w}/${windows})`);
     logTabSlow(page, label, s, `BUSY ${w}/${windows}`);
   }
