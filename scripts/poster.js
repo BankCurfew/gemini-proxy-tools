@@ -19,7 +19,7 @@ const defaults = {
   brand_chat_id: '6a2e2fee-f228-83ec-a55a-e85f221d620f',
   output_dir: '/mnt/c/Users/mbank/OneDrive/AIA/Posters',
   downloads_dir: '/mnt/c/Users/mbank/Downloads',
-  cdp_url: 'http://localhost:9222',
+  cdp_url: process.env.POSTER_CDP_URL || 'http://localhost:9222',   // POSTER_CDP_URL = tests only (T2801 fake stalled CDP)
   cdp_protocol_timeout: 120000,
   tab_call_timeout_ms: 30000,   // T2753: one silent window on the chat tab before TAB BUSY (busy hidden tab ≥30 s)
   tab_busy_windows: 3,          // T2753: silent windows before giving up with TabBusyError
@@ -309,13 +309,24 @@ function heartbeat(taskId, pct, status) {
 }
 
 let _createdPages = [];
+// T2801 (designer 8 Oct 16:3x, "hangs at connect, no output in 40 s"): during a VideoEditor render the CDP websocket
+// attach stalls (dev probe: puppeteer.connect no answer in 60 s while /json/version answered in 2 ms). protocolTimeout
+// does not cover the attach, so give connect + pages() a deadline and fail as TAB BUSY (exit 75, nothing sent).
+const CONNECT_MS = Number(process.env.POSTER_CONNECT_MS) || 60000;
+function connectDeadline(p, what) {
+  let t;
+  const late = new Promise((_, rej) => { t = setTimeout(() => rej(new TabBusyError(
+    `TAB BUSY: Chrome CDP ${what} gave no answer in ${Math.round(CONNECT_MS / 1000)} s (machine loaded or Chrome stalled): nothing sent, retry later`)), CONNECT_MS); });
+  return Promise.race([p, late]).finally(() => clearTimeout(t));
+}
+
 async function connect() {
-  const browser = await puppeteer.connect({
+  const browser = await connectDeadline(puppeteer.connect({
     browserURL: cfg.cdp_url,
     defaultViewport: null,
     protocolTimeout: cfg.cdp_protocol_timeout,
-  });
-  const pages = await browser.pages();
+  }), 'connect');
+  const pages = await connectDeadline(browser.pages(), 'tab list');
   const activeChatId = getActiveBrandChatId();
   // T599: ONLY accept the active brand chat. Never fall back to ANY other chatgpt.com/c/
   // tab — that is the cross-brand contamination vector (a WB prompt could land in the iAgency chat).
@@ -351,7 +362,7 @@ async function connect() {
 }
 
 async function connectAnyChatgptTab() {
-  const browser = await puppeteer.connect({ browserURL: cfg.cdp_url, defaultViewport: null, protocolTimeout: cfg.cdp_protocol_timeout });
+  const browser = await connectDeadline(puppeteer.connect({ browserURL: cfg.cdp_url, defaultViewport: null, protocolTimeout: cfg.cdp_protocol_timeout }), 'connect');
   const page = (await browser.pages()).find(p => p.url().includes('chatgpt.com'));
   if (!page) throw new Error(`🚫 CONNECT FAILED: No ChatGPT tab open in browser. Open ONE https://chatgpt.com/ tab, then retry.`);
   return { browser, page: guardTab(page) };
@@ -1667,7 +1678,16 @@ Examples:
   // T2406: new-chat creates the brand, so it cannot resolve the brand's chat first (connect() exits for an unknown brand).
   // It attaches to the one existing ChatGPT tab instead; newChat() navigates that tab to a fresh chat.
   // T2775: rename is API-only, so it also runs in whatever ChatGPT tab is open (never navigates it)
-  const { browser, page } = (cmd === 'new-chat' || cmd === 'rename') ? await connectAnyChatgptTab() : await connect();
+  // T2801: a render stalls Chrome's CDP attach, so wait for it BEFORE connecting (every command, said out loud), and a
+  // connect that still gets no answer ends as TAB BUSY (exit 75) instead of hanging with no output
+  let browser, page;
+  try {
+    await waitRenderIdle('connect');
+    ({ browser, page } = (cmd === 'new-chat' || cmd === 'rename') ? await connectAnyChatgptTab() : await connect());
+  } catch (e) {
+    if (e instanceof TabBusyError) { console.error('⏳', e.message); process.exit(EXIT_TAB_BUSY); }
+    throw e;
+  }
 
   try {
     switch (cmd) {
