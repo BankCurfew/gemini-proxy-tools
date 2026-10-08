@@ -23,6 +23,7 @@ const defaults = {
   cdp_protocol_timeout: 120000,
   tab_call_timeout_ms: 30000,   // T2753: one silent window on the chat tab before TAB BUSY (busy hidden tab ≥30 s)
   tab_busy_windows: 3,          // T2753: silent windows before giving up with TabBusyError
+  render_wait_ms: 900000,       // T2790: wait up to 15 min for a running VideoEditor render-gate before sending
   generation_timeout_ms: 180000,
   poll_interval_ms: 5000,
   stall_threshold_polls: 6,
@@ -649,9 +650,37 @@ async function clearComposer(page) {
   return left;
 }
 
+// T2790 (bob → A): VideoEditor render-gate (gates + CapCut export) loads the machine until แบงค์'s Chrome stalls: caught live
+// 8 Oct 09:50, ChatGPT tab evaluate 47-59 s during a render vs 20 ms between runs. render-gate marks each run with
+// ~/.oracle/state/render-gate.d/<pid>; before any send we wait while a marker's pid is alive, then give up with exit 75.
+// Waiting happens BEFORE the composer is touched, so a give-up sends nothing. Dead-pid markers (a killed run) are ignored.
+const RENDER_DIR = process.env.POSTER_RENDER_DIR || path.join(process.env.HOME || '/home/curfew', '.oracle/state/render-gate.d');
+function liveRenders() {
+  let names = [];
+  try { names = fs.readdirSync(RENDER_DIR); } catch { return []; }
+  return names.filter((n) => {
+    const pid = Number(n); if (!Number.isInteger(pid) || pid <= 1) return false;
+    try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+  });
+}
+async function waitRenderIdle(label) {
+  const maxMs = Number(process.env.POSTER_RENDER_WAIT_MS) || cfg.render_wait_ms;
+  let live = liveRenders();
+  if (!live.length) return;
+  console.log(`[${label}] VideoEditor render-gate running (pid ${live.join(',')}): waiting up to ${Math.round(maxMs / 60000)} min before sending (T2790)`);
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    await sleep(Math.min(10000, maxMs / 10));
+    live = liveRenders();
+    if (!live.length) { console.log(`[${label}] render-gate finished, sending`); return; }
+  }
+  throw new TabBusyError(`TAB BUSY: VideoEditor render-gate still running after ${Math.round(maxMs / 1000)} s (pid ${live.join(',')}): nothing sent, retry later`);
+}
+
 // Fill → read back → send → prove a NEW user turn appeared (or the chat URL changed, for a brand-new chat).
 async function sendAndConfirm(page, text, opts = {}) {
   const label = opts.label || 'send';
+  await waitRenderIdle(label);
   await installComposerFinder(page);
   const before = await lastUser(page); // newest user message BEFORE any attempt: the reload check must see a NEW one
   const first = await sendOnce(page, text, opts);
@@ -1733,4 +1762,4 @@ if (require.main === module) main()
     if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(EXIT_TAB_BUSY); }
     console.error('ERROR:', e.message); process.exit(1);
   });   // T2790: requirable by test/t2790-stalled-send.test.js
-module.exports = { sendAndConfirm, installComposerFinder };
+module.exports = { sendAndConfirm, installComposerFinder, liveRenders };
