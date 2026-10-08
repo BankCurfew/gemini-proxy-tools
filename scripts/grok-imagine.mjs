@@ -41,9 +41,11 @@ try {
   for (let i = 0; i < 30 && (await page.evaluate(() => document.body.innerText.length)) < 60; i++) await sleep(1000);
   await sleep(1500);
   // Grok's own error text, from the MAIN area only: the sidebar lists chat titles ("… Unlimited NSFW …" matched /limit/)
+  // T2806 (designer 8 Oct 16:54): <script> leaves count as leaves too — Next.js's self.__next_f JSON says "limit", and
+  // that raw script was printed as if Grok had said it. Visible text only.
   const grokSays = () => page.evaluate(() => {
     const scope = document.querySelector('main') || document.body;
-    const t = [...scope.querySelectorAll('*')].filter((e) => !e.closest('nav,aside,[data-sidebar]') && !e.children.length).map((e) => e.innerText || '').join('\n');
+    const t = [...scope.querySelectorAll('*')].filter((e) => !e.closest('nav,aside,[data-sidebar],script,style,noscript,template') && !e.children.length).map((e) => e.innerText || '').join('\n');
     const m = t.match(/[^\n]*\b(usage limit|rate limit|limit reached|hit your [a-z ]*limit|upgrade to supergrok|sign in to|log in to|moderat\w*|content polic\w*|not allowed|try again later|something went wrong)\b[^\n]*/i);
     return m ? m[0].trim().slice(0, 300) : '';
   });
