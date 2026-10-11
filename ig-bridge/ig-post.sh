@@ -65,7 +65,9 @@ planner_gate() {  # <platform> <type> <prepare-id> — refuses (exit) unless the
 }
 
 send() {  # $1 = json payload, $2 = timeout seconds; prints the matching response
-  local payload="$1" to="$2" id; id=$(jq -r .id <<<"$payload")
+  # T2906 S2-B: the agent runs only commands signed with the vault key (ts + HMAC); sign.mjs reads the key file itself
+  local payload to="$2" id; payload=$(node "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/sign.mjs" "$1") || die "could not sign the command (T2906)"
+  id=$(jq -r .id <<<"$payload")
   local out; out=$(mktemp)
   timeout "$to" mosquitto_sub -h "$HOST" -t "$RES_T" -R > "$out" & local sp=$!
   sleep 0.5

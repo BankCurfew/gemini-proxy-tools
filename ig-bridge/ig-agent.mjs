@@ -17,6 +17,7 @@ import { validateCommand, ratioOk, classifyReadback, MEDIA_TYPE } from './lib.mj
 import * as web from './ig-web.mjs';
 import * as graph from './graph.mjs';
 import * as mbs from './mbs-web.mjs';
+import { loadKey, verify } from './sign.mjs';
 
 // Production account (default context) reads back through Graph (bob/แบงค์ 1/10); isolated test accounts via the web API.
 const viaGraph = (user) => web.usesDefaultContext(user) && graph.graphAvailable();
@@ -324,8 +325,19 @@ async function handle(cmd) {
 
 // ---------- MQTT loop (serial: one browser job at a time) ----------
 let chain = Promise.resolve();
+// T2906 S2-B: every command must be signed with the vault key (sign.mjs); no key = nothing runs (fail closed)
+let KEY = null;
+try { KEY = loadKey(); } catch (e) { console.error(`ig-bridge: ${e.message} — every command will be refused · fix: ~/.oracle/security/ig-bridge-hmac.env (T2906)`); }
+const seen = new Map();
 function onLine(line) {
   let cmd; try { cmd = JSON.parse(line); } catch { return; }
+  const refused = verify(KEY, cmd, seen);
+  if (refused) {
+    const id = typeof cmd?.id === 'string' ? cmd.id.slice(0, 64) : null, action = typeof cmd?.action === 'string' ? cmd.action.slice(0, 32) : null;
+    log({ rejected: refused, id, action });
+    chain = chain.then(() => pub(T.res, { id, action, ok: false, error: `rejected: ${refused}` }));
+    return;
+  }
   chain = chain.then(async () => {
     const t0 = Date.now();
     let res; try { res = await handle(cmd); } catch (e) { res = { ok: false, error: String(e?.message || e) }; }
