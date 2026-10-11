@@ -200,6 +200,7 @@ if [ -n "$RESULT" ]; then
     DL_DIR="$(wslpath "$WIN_PROFILE")/Downloads"
     DL_OK=false
     DL_FILENAME=""
+    DL_START=$(date +%s)   # T2890: for the newest-file fallback below
     # "response detected" above fires on ANY text change, including Gemini's
     # own transient "Creating your image..." loading text — so the image can
     # still be mid-render here. download_images's blob_to_data conversion is
@@ -239,6 +240,20 @@ for line in open('${_dtmp}'):
       NEWEST="${DL_DIR}/${DL_FILENAME}"
     else
       NEWEST=""
+    fi
+    # T2890 (11 Oct): Chrome :9222 saved the image as "download (N).jpg", not the name the extension reported
+    # (its onDeterminingFilename hint is registered only after downloads.download() returns), so the exact-name
+    # wait never matched while the image sat in Downloads. Fallback: the newest image there written since this
+    # download started. Listed with cmd.exe dir: WSL's own listing of that folder hits an I/O error.
+    if [ -n "$DL_FILENAME" ] && [ ! -f "$NEWEST" ]; then
+      NEWEST=""
+      while IFS= read -r cand; do
+        case "${cand,,}" in *.png|*.jpg|*.jpeg|*.webp) ;; *) continue;; esac
+        f="${DL_DIR}/${cand}"
+        if [ -f "$f" ] && [ "$(stat -c %Y "$f" 2>/dev/null || echo 0)" -ge "$DL_START" ]; then
+          NEWEST="$f"; echo "[~] saved as '${cand}' (reported '${DL_FILENAME}')"; break
+        fi
+      done < <(cd /tmp && "$CMD_EXE" /c dir /b /a-d /o-d "$WIN_PROFILE\\Downloads" 2>/dev/null | tr -d '\r' | head -15)   # separate args: quotes inside one /c string reach cmd mangled
     fi
     if [ -n "$NEWEST" ] && [ -f "$NEWEST" ]; then
       EXT="${NEWEST##*.}"
