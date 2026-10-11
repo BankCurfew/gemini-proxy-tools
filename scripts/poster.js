@@ -808,21 +808,25 @@ async function attachFiles(page, files) {
   const onRes = (r) => { if (r.url().includes('/backend-api/files/process_upload_stream') && r.status() === 200) processed++; };
   page.on('response', onRes);
   try {
-    const paths = [];
-    for (const f of files) paths.push(await browserPath(page, f));
-    await input.uploadFile(...paths);
     const names = files.map((f) => path.basename(f));
-    const deadline = Date.now() + 60000;
-    while (Date.now() < deadline) {
-      const failed = await page.evaluate(() => {
-        const box = document.querySelector('[data-composer-attachments]');
-        return !!box && /Upload failed/i.test(box.innerText || '');
-      });
-      if (failed) { console.error(`🚫 attach: ChatGPT shows "Upload failed" for ${names.join(', ')}`); return false; }
-      if (processed >= files.length) break;
-      await sleep(500);
+    // T2913: the composer input has no `multiple`, so uploadFile(a, b) throws "Multiple file uploads only work with
+    // <input type=file multiple>". One file per call, each waited to its 200, re-querying the input (React re-mounts it).
+    for (let k = 0; k < files.length; k++) {
+      const inp = k === 0 ? input : (await page.$('form input[type="file"][accept="image/*"]') || await page.$('form input[type="file"]'));
+      if (!inp) { console.error(`🚫 attach: file input gone after ${k}/${files.length} uploads`); return false; }
+      await inp.uploadFile(await browserPath(page, files[k]));
+      const deadline = Date.now() + 60000;
+      while (Date.now() < deadline) {
+        const failed = await page.evaluate(() => {
+          const box = document.querySelector('[data-composer-attachments]');
+          return !!box && /Upload failed/i.test(box.innerText || '');
+        });
+        if (failed) { console.error(`🚫 attach: ChatGPT shows "Upload failed" for ${names[k]}`); return false; }
+        if (processed >= k + 1) break;
+        await sleep(500);
+      }
+      if (processed < k + 1) { console.error(`🚫 attach: ${processed}/${files.length} uploads finished after 60s`); return false; }
     }
-    if (processed < files.length) { console.error(`🚫 attach: ${processed}/${files.length} uploads finished after 60s`); return false; }
     for (const n of names) console.log(`[attach] uploaded ${n}`);
     return true;
   } finally { page.off('response', onRes); }
@@ -843,7 +847,10 @@ async function attachCmd(page, args) {
   if (!bc.ok) { console.error(`\n🚫 ABORT (T599): ${bc.reason}`); process.exitCode = 4; return; }
   if (DRY_RUN) { console.log(`[dry-run] would attach ${files.map((f) => path.basename(f)).join(', ')}${message ? ' + send message' : ''}`); return; }
 
-  const before = (await readTurns(page)).length;
+  // T2913: compare the newest turn's key, not the count: ChatGPT unmounts old turns in long chats, so the count
+  // can stay flat while the new turn is there (designer 11 Oct: send confirmed, image came, exit 1 "no new turn").
+  const beforeTurns = await readTurns(page); const before = beforeTurns.length;
+  const beforeKey = before ? beforeTurns[before - 1].key : null;
   if (!(await attachFiles(page, files))) { process.exitCode = 1; return; }
   if (!message) {
     console.log('[attach] staged only — the next `prompt` sends it with the text');
@@ -856,11 +863,12 @@ async function attachCmd(page, args) {
   let turn = null;
   while (Date.now() < deadline) {
     const turns = await readTurns(page);
-    if (turns.length > before) { turn = turns[turns.length - 1]; if (turn.userImages.length >= files.length) break; }
+    const last = turns[turns.length - 1];
+    if (last && (last.key ? last.key !== beforeKey : turns.length > before)) { turn = last; if (turn.userImages.length >= files.length) break; }
     await sleep(1000);
   }
   if (!turn) { console.error('🚫 attach: sent, but no new turn appeared within 20s'); process.exitCode = 1; return; }
-  console.log(`[attach] sent · turn ${before + 1} · user images on turn: ${turn.userImages.length}/${files.length}`);
+  console.log(`[attach] sent · turn ${turn.key || before + 1} · user images on turn: ${turn.userImages.length}/${files.length}`);
   if (turn.userImages.length < files.length) { console.error('⚠️  attach: the turn shows fewer images than attached — check the chat'); process.exitCode = 1; }
 }
 
