@@ -94,10 +94,8 @@ GEN_START=$(date +%s)
 _get_response() {
   local gid="$1"
   local _gtmp=$(mktemp)
-  timeout 8 mosquitto_sub -t 'claude/browser/response' -C 3 -W 6 2>/dev/null < <(
-    sleep 1
-    mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"get_response\",\"tabId\":$TAB_ID,\"id\":\"${gid}\",\"ts\":$(date +%s%3N)}"
-  ) > "$_gtmp" 2>/dev/null || true
+  # T2890: mqtt-call.py waits for THIS id's ok reply; error replies from copies without the tab no longer end the wait
+  python3 "$SCRIPT_DIR/mqtt-call.py" --timeout 30 --need answer "{\"action\":\"get_response\",\"tabId\":$TAB_ID,\"id\":\"${gid}\"}" > "$_gtmp" 2>/dev/null || true
   python3 -c "
 import json
 for line in open('${_gtmp}'):
@@ -124,11 +122,10 @@ _send_chat() {
   local extra=",\"tabId\":$tid"
   [ "$new_chat" = "true" ] && extra="$extra,\"newChat\":true"
   local _ctmp=$(mktemp)
-  timeout 8 mosquitto_sub -t 'claude/browser/response' -C 6 -W 6 2>/dev/null < <(
-    sleep 1
-    mosquitto_pub -t 'claude/browser/command' \
-      -m "{\"action\":\"chat\",\"text\":$(printf '%s' "$TEXT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"id\":\"${cid}\"${extra},\"ts\":$(date +%s%3N)}"
-  ) > "$_ctmp" 2>/dev/null || true
+  # T2890: was -C 6 -W 6. The tab-holding instance answers a tab command in ~4-26 s (live 11 Oct: get_response 4.2 s,
+  # navigate 25.7 s); an old proxy copy's "No tab with id" errors (one per leaked client) filled the 6 slots
+  python3 "$SCRIPT_DIR/mqtt-call.py" --timeout 60 \
+    "{\"action\":\"chat\",\"text\":$(printf '%s' "$TEXT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),\"id\":\"${cid}\"${extra}}" > "$_ctmp" 2>/dev/null || true
   python3 -c "
 import json
 # T2406: other proxy instances answer 'No tab with id' for a tab they do not hold; prefer the reply without an error
@@ -205,10 +202,8 @@ if [ -n "$RESULT" ]; then
     # long wait, no retry (a real failure here means try the whole script
     # again, not hammer this same call).
     _dtmp=$(mktemp)
-    timeout 125 mosquitto_sub -t 'claude/browser/response' -C 3 -W 122 2>/dev/null < <(
-      sleep 1
-      mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"download_images\",\"tabId\":$TAB_ID,\"id\":\"dl_${ID}\",\"ts\":$(date +%s%3N)}"
-    ) > "$_dtmp" 2>/dev/null &
+    # T2890: 3 instant error replies from copies without the tab used to end this 122 s wait (-C 3)
+    python3 "$SCRIPT_DIR/mqtt-call.py" --timeout 122 "{\"action\":\"download_images\",\"tabId\":$TAB_ID,\"id\":\"dl_${ID}\"}" > "$_dtmp" 2>/dev/null &
     DL_BGPID=$!
     while kill -0 "$DL_BGPID" 2>/dev/null; do
       sleep 3
