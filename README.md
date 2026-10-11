@@ -77,6 +77,17 @@ mosquitto_sub -t 'claude/browser/state' -C 1
 
 ---
 
+### Opening a Gemini tab the extension can see (T2890)
+The proxy extension lists tabs of Chrome :9222's **default** browser context only. A tab from a puppeteer
+`createBrowserContext` or a pw-cli session is invisible to it.
+```bash
+TID=$(node scripts/gemini-open-tab.mjs)            # Target.createTarget, default context, background
+bash scripts/gemini-status.sh                      # "Gemini Tab: 1 tab(s) detected" (replies=N with_gemini=M)
+node scripts/gemini-open-tab.mjs --close "$TID"    # close your own tab when done (GR#5)
+```
+`gemini-status.sh` collects every proxy reply for its own request id (several instances answer, T2406); before
+T2890 it read only the first message and could say "not detected" while the tab was there.
+
 ## CRITICAL: Always Use `tabId`
 
 Without `tabId`, the extension picks the "most recently active" Gemini tab — which **changes unpredictably** when you have multiple tabs or Gemini opens new conversations. This causes commands to hit the wrong tab every time.

@@ -37,14 +37,36 @@ echo ""
 
 # Gemini tab — use list_tabs (live) instead of retained state topic (stale)
 # Race-condition fix (#7): increased sub→pub delay + retry
+DIAG=$(mktemp)
 _status_ping() {
   local sid="$1" delay="$2"
   mosquitto_pub -t 'claude/browser/response' -r -n 2>/dev/null
   sleep 0.3
-  TABS_RESULT=$(timeout 8 mosquitto_sub -t 'claude/browser/response' -C 1 -W 6 2>/dev/null < <(
+  # T2890: several proxy instances answer list_tabs (T2406). Taking the FIRST message (-C 1, no id filter) reported
+  # "not detected" while the instance holding the Gemini tab answered later. Same rule as gemini-gen.sh: collect up
+  # to 5 replies for THIS id within 12 s, prefer one holding a gemini tab, else any live reply.
+  local tmp; tmp=$(mktemp)
+  timeout 14 mosquitto_sub -t 'claude/browser/response' -C 5 -W 12 2>/dev/null < <(
     sleep "$delay"
     mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"list_tabs\",\"id\":\"${sid}\",\"ts\":$(date +%s%3N)}"
-  ) 2>/dev/null || echo '{}')
+  ) > "$tmp" 2>/dev/null || true
+  TABS_RESULT=$(python3 -c "
+import json, sys
+got = []
+for line in open(sys.argv[1]):
+    try:
+        d = json.loads(line)
+        if d.get('id') == sys.argv[2]: got.append(d)
+    except Exception: pass
+g = [d for d in got if any(t.get('platform') == 'gemini' for t in d.get('tabs', []))]
+if g:
+    d = dict(g[0]); d['tabs'] = [t for t in d['tabs'] if t.get('platform') == 'gemini']; d['count'] = len(d['tabs'])
+    print(json.dumps(d))
+elif got: print(json.dumps(dict(got[0], count=0, tabs=[])))
+else: print('{}')
+print(f'replies={len(got)} with_gemini={len(g)}', file=sys.stderr)
+" "$tmp" "$sid" 2>>"$DIAG")
+  rm -f "$tmp"
 }
 _status_ping "status_$(date +%s)" 1
 TAB_COUNT=$(echo "$TABS_RESULT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('count',0))" 2>/dev/null || echo "0")
@@ -54,6 +76,7 @@ if ! [ "$TAB_COUNT" -gt 0 ] 2>/dev/null; then
   _status_ping "status_$(date +%s)_retry" 1.5
 fi
 TAB_COUNT=$(echo "$TABS_RESULT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('count',0))" 2>/dev/null || echo "0")
+[ -s "$DIAG" ] && echo "     ($(tr '\n' ' ' < "$DIAG"))"; rm -f "$DIAG"
 TAB_INFO=$(echo "$TABS_RESULT" | python3 -c "
 import sys,json
 d = json.loads(sys.stdin.read())
