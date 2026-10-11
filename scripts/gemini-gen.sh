@@ -34,7 +34,9 @@ _ping_attempt() {
   sleep 0.3
   _mqtt_start=$(date +%s%3N)
   local _ptmp=$(mktemp)
-  timeout 8 mosquitto_sub -t 'claude/browser/response' -C 5 -W 6 2>/dev/null < <(
+  # T2890: -C counts EVERY message on the topic; an old proxy copy (no instance, leaks a client per ~30 s) sends
+  # one empty reply per connection, so 5 of them could fill -C 5 before the instance with the tab answers (~3 s).
+  timeout 12 mosquitto_sub -t 'claude/browser/response' -C 20 -W 10 2>/dev/null < <(
     sleep "$delay"
     mosquitto_pub -t 'claude/browser/command' -m "{\"action\":\"list_tabs\",\"id\":\"${attempt_id}\",\"ts\":$(date +%s%3N)}"
   ) > "$_ptmp" 2>/dev/null || true
