@@ -91,6 +91,7 @@ echo "[tab:$TAB_ID]"
 GEN_START=$(date +%s)
 
 # Get initial response text (before sending)
+# prints "<reply count><TAB><answer>" (T2890: every image reply's text settles to the same toolbar glyphs)
 _get_response() {
   local gid="$1"
   local _gtmp=$(mktemp)
@@ -102,13 +103,17 @@ for line in open('${_gtmp}'):
     try:
         d=json.loads(line.strip())
         if d.get('id')=='${gid}' and d.get('answer'):
-            print(d['answer'][:200]); break
+            print(str(d.get('count') or 0) + chr(9) + d['answer'][:200].replace(chr(10), ' ')); break
     except: pass
 " 2>/dev/null || true
   rm -f "$_gtmp"
 }
 
-INIT_ANSWER=$(_get_response "init_${ID}")
+INIT_RAW=$(_get_response "init_${ID}")
+INIT_COUNT=0; INIT_ANSWER=""
+if [ -n "$INIT_RAW" ]; then INIT_COUNT=${INIT_RAW%%$'\t'*}; INIT_ANSWER=${INIT_RAW#*$'\t'}; fi
+# No reset for --new: a poll that still sees the old chat must read as "nothing new" (equal count + text), or
+# download_images would fetch the old chat's image. The new chat's count differs from the old one's.
 
 # T1124: send chat and READ ITS OWN RESPONSE — a stale/phantom tab (Chrome's
 # tabs.query and tabs.get can disagree during teardown) errors back in <1s
@@ -167,8 +172,12 @@ RESULT=""
 SECONDS=0
 while [ $SECONDS -lt 150 ]; do
   sleep 3
-  CURRENT=$(_get_response "poll_${SECONDS}_$(date +%s%3N)")
-  if [ -n "$CURRENT" ] && [ "$CURRENT" != "$INIT_ANSWER" ] && ! echo "$CURRENT" | grep -qi "creating your image"; then
+  CUR_RAW=$(_get_response "poll_${SECONDS}_$(date +%s%3N)")
+  CUR_COUNT=${CUR_RAW%%$'\t'*}; CURRENT=${CUR_RAW#*$'\t'}
+  # T2890 (11 Oct 09:31-09:44, 5 runs): an image reply after an image reply has the same glyph text, so a text-only
+  # compare never fired while the tab's reply count went 6 → 7. A new reply = the count OR the text differs from before.
+  if [ -n "$CURRENT" ] && { [ "${CUR_COUNT:-0}" -ne "${INIT_COUNT:-0}" ] 2>/dev/null || [ "$CURRENT" != "$INIT_ANSWER" ]; } \
+     && ! echo "$CURRENT" | grep -qi "creating your image"; then
     RESULT="OK"
     break
   fi
@@ -294,6 +303,6 @@ for line in open('${_dtmp}'):
   exit 0
 else
   echo ""
-  echo "[!] Timeout (90s)"
+  echo "[!] Timeout (150s): no new reply (count stayed ${INIT_COUNT}, text unchanged)"
   exit 1
 fi
