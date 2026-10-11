@@ -36,8 +36,18 @@ fs.mkdirSync(DATA, { recursive: true }); fs.mkdirSync(SHOTS, { recursive: true }
 
 const now = () => new Date().toISOString();
 const log = rec => fs.appendFileSync(LOG_FILE, JSON.stringify({ ts: now(), ...rec }) + '\n');
+// T2906 S2-A: the broker login is user ig-agent, read by mosquitto_pub/_sub from $XDG_CONFIG_HOME (admin, 0600), never
+// argv. Fail closed: without both files mosquitto would fall back to the CLI default login (browser-cli) or anonymous.
+const MQTT_XDG = process.env.IG_AGENT_MQTT_XDG || path.join(HOME, '.oracle', 'mqtt-credentials', 'xdg', 'ig-agent');
+for (const tool of ['mosquitto_pub', 'mosquitto_sub']) {
+  const f = path.join(MQTT_XDG, tool);
+  if (!fs.existsSync(f) || !/^-u\s/m.test(fs.readFileSync(f, 'utf8'))) {
+    console.error(`ig-agent: no -u login in ${f} · fix: ask admin for the ig-agent client config (T2906)`); process.exit(2);
+  }
+}
+const MQTT_ENV = { ...process.env, XDG_CONFIG_HOME: MQTT_XDG };
 const pub = (topic, obj, retain = false) => new Promise(res => {
-  const p = spawn('mosquitto_pub', ['-h', 'localhost', '-t', topic, ...(retain ? ['-r'] : []), '-m', JSON.stringify(obj)], { stdio: 'ignore' });
+  const p = spawn('mosquitto_pub', ['-h', 'localhost', '-t', topic, ...(retain ? ['-r'] : []), '-m', JSON.stringify(obj)], { stdio: 'ignore', env: MQTT_ENV });
   p.on('close', res);
 });
 
@@ -351,7 +361,7 @@ let sub = null, stopping = false;
 const stop = () => { stopping = true; sub?.kill(); process.exit(0); };   // never leave an orphan mosquitto_sub behind (pm2 restart = SIGINT)
 process.on('SIGINT', stop); process.on('SIGTERM', stop);
 function subscribe() {
-  sub = spawn('mosquitto_sub', ['-h', 'localhost', '-t', T.cmd, '-R'], { stdio: ['ignore', 'pipe', 'inherit'] });
+  sub = spawn('mosquitto_sub', ['-h', 'localhost', '-t', T.cmd, '-R'], { stdio: ['ignore', 'pipe', 'inherit'], env: MQTT_ENV });
   let buf = '';
   sub.stdout.on('data', d => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { onLine(buf.slice(0, i)); buf = buf.slice(i + 1); } });
   sub.on('close', code => { if (stopping) return; console.error(`mosquitto_sub exited ${code}, resubscribing in 3s`); setTimeout(subscribe, 3000); });
