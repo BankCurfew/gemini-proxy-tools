@@ -338,6 +338,18 @@ done
 ./scripts/gemini-gen.sh "continue here" --tab 192573296  # Pin specific tab
 ```
 
+### Example 4: Upscale a Gemini 9:16 image to reel size (T2902)
+
+Gemini caps 9:16 output at 572x1024. `upscale.sh` runs Real-ESRGAN x2 on the local GPU (~1 s per image), then
+`--fit` cover-crops to an exact size. Output: `<name>-x2.png` next to the input (or in `--out DIR`).
+
+```bash
+./scripts/upscale.sh plate.png --fit 1080x1920
+./scripts/upscale.sh a.png b.png --fit 1080x1920 --out ~/upscaled
+```
+
+Needs the venv at `~/.oracle/tools/realesrgan/` (torch CUDA + spandrel + `RealESRGAN_x2plus.pth`); ask Dev if it is missing.
+
 ---
 
 ## For AI Agents (Claude Code / Oracle)
