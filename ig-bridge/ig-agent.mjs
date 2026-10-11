@@ -17,6 +17,7 @@ import { validateCommand, ratioOk, classifyReadback, MEDIA_TYPE } from './lib.mj
 import * as web from './ig-web.mjs';
 import * as graph from './graph.mjs';
 import * as mbs from './mbs-web.mjs';
+import { loadKey, verify } from './sign.mjs';
 
 // Production account (default context) reads back through Graph (bob/แบงค์ 1/10); isolated test accounts via the web API.
 const viaGraph = (user) => web.usesDefaultContext(user) && graph.graphAvailable();
@@ -35,8 +36,18 @@ fs.mkdirSync(DATA, { recursive: true }); fs.mkdirSync(SHOTS, { recursive: true }
 
 const now = () => new Date().toISOString();
 const log = rec => fs.appendFileSync(LOG_FILE, JSON.stringify({ ts: now(), ...rec }) + '\n');
+// T2906 S2-A: the broker login is user ig-agent, read by mosquitto_pub/_sub from $XDG_CONFIG_HOME (admin, 0600), never
+// argv. Fail closed: without both files mosquitto would fall back to the CLI default login (browser-cli) or anonymous.
+const MQTT_XDG = process.env.IG_AGENT_MQTT_XDG || path.join(HOME, '.oracle', 'mqtt-credentials', 'xdg', 'ig-agent');
+for (const tool of ['mosquitto_pub', 'mosquitto_sub']) {
+  const f = path.join(MQTT_XDG, tool);
+  if (!fs.existsSync(f) || !/^-u\s/m.test(fs.readFileSync(f, 'utf8'))) {
+    console.error(`ig-agent: no -u login in ${f} · fix: ask admin for the ig-agent client config (T2906)`); process.exit(2);
+  }
+}
+const MQTT_ENV = { ...process.env, XDG_CONFIG_HOME: MQTT_XDG };
 const pub = (topic, obj, retain = false) => new Promise(res => {
-  const p = spawn('mosquitto_pub', ['-h', 'localhost', '-t', topic, ...(retain ? ['-r'] : []), '-m', JSON.stringify(obj)], { stdio: 'ignore' });
+  const p = spawn('mosquitto_pub', ['-h', 'localhost', '-t', topic, ...(retain ? ['-r'] : []), '-m', JSON.stringify(obj)], { stdio: 'ignore', env: MQTT_ENV });
   p.on('close', res);
 });
 
@@ -324,8 +335,19 @@ async function handle(cmd) {
 
 // ---------- MQTT loop (serial: one browser job at a time) ----------
 let chain = Promise.resolve();
+// T2906 S2-B: every command must be signed with the vault key (sign.mjs); no key = nothing runs (fail closed)
+let KEY = null;
+try { KEY = loadKey(); } catch (e) { console.error(`ig-bridge: ${e.message} — every command will be refused · fix: ~/.oracle/security/ig-bridge-hmac.env (T2906)`); }
+const seen = new Map();
 function onLine(line) {
   let cmd; try { cmd = JSON.parse(line); } catch { return; }
+  const refused = verify(KEY, cmd, seen);
+  if (refused) {
+    const id = typeof cmd?.id === 'string' ? cmd.id.slice(0, 64) : null, action = typeof cmd?.action === 'string' ? cmd.action.slice(0, 32) : null;
+    log({ rejected: refused, id, action });
+    chain = chain.then(() => pub(T.res, { id, action, ok: false, error: `rejected: ${refused}` }));
+    return;
+  }
   chain = chain.then(async () => {
     const t0 = Date.now();
     let res; try { res = await handle(cmd); } catch (e) { res = { ok: false, error: String(e?.message || e) }; }
@@ -339,7 +361,7 @@ let sub = null, stopping = false;
 const stop = () => { stopping = true; sub?.kill(); process.exit(0); };   // never leave an orphan mosquitto_sub behind (pm2 restart = SIGINT)
 process.on('SIGINT', stop); process.on('SIGTERM', stop);
 function subscribe() {
-  sub = spawn('mosquitto_sub', ['-h', 'localhost', '-t', T.cmd, '-R'], { stdio: ['ignore', 'pipe', 'inherit'] });
+  sub = spawn('mosquitto_sub', ['-h', 'localhost', '-t', T.cmd, '-R'], { stdio: ['ignore', 'pipe', 'inherit'], env: MQTT_ENV });
   let buf = '';
   sub.stdout.on('data', d => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { onLine(buf.slice(0, i)); buf = buf.slice(i + 1); } });
   sub.on('close', code => { if (stopping) return; console.error(`mosquitto_sub exited ${code}, resubscribing in 3s`); setTimeout(subscribe, 3000); });
