@@ -85,7 +85,7 @@ TID=$(node scripts/gemini-open-tab.mjs)            # Target.createTarget, defaul
 bash scripts/gemini-status.sh                      # "Gemini Tab: 1 tab(s) detected" (replies=N with_gemini=M)
 node scripts/gemini-open-tab.mjs --close "$TID"    # close your own tab when done (GR#5)
 ```
-`gemini-status.sh` collects every proxy reply for its own request id (several instances answer, T2406); before
+`gemini-status.sh` collects up to 5 replies for its own request id within 12 s (`-C 5 -W 12`; several instances answer, T2406) and prefers the one holding a Gemini tab; before
 T2890 it read only the first message and could say "not detected" while the tab was there.
 
 ## CRITICAL: Always Use `tabId`
