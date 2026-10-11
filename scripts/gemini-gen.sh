@@ -245,8 +245,14 @@ for line in open('${_dtmp}'):
     # (its onDeterminingFilename hint is registered only after downloads.download() returns), so the exact-name
     # wait never matched while the image sat in Downloads. Fallback: the newest image there written since this
     # download started. Listed with cmd.exe dir: WSL's own listing of that folder hits an I/O error.
+    # T2890 (11 Oct 09:24): one scan right after the 5 s wait missed a save that landed 2 s later
+    # (designer r10-2, "download (22).jpg"); rescan every 3 s for up to LATE_SAVE_WAIT s.
+    LATE_SAVE_WAIT=${LATE_SAVE_WAIT:-45}
     if [ -n "$DL_FILENAME" ] && [ ! -f "$NEWEST" ]; then
       NEWEST=""
+      _late_end=$(( $(date +%s) + LATE_SAVE_WAIT ))
+      while :; do
+      [ -f "${DL_DIR}/${DL_FILENAME}" ] && { NEWEST="${DL_DIR}/${DL_FILENAME}"; break; }
       while IFS= read -r cand; do
         case "${cand,,}" in *.png|*.jpg|*.jpeg|*.webp) ;; *) continue;; esac
         f="${DL_DIR}/${cand}"
@@ -254,6 +260,11 @@ for line in open('${_dtmp}'):
           NEWEST="$f"; echo "[~] saved as '${cand}' (reported '${DL_FILENAME}')"; break
         fi
       done < <(cd /tmp && "$CMD_EXE" /c dir /b /a-d /o-d "$WIN_PROFILE\\Downloads" 2>/dev/null | tr -d '\r' | head -15)   # separate args: quotes inside one /c string reach cmd mangled
+      [ -n "$NEWEST" ] && break
+      [ "$(date +%s)" -ge "$_late_end" ] && break
+      printf "  (waiting for the saved file...)\r" >&2
+      sleep 3
+      done
     fi
     if [ -n "$NEWEST" ] && [ -f "$NEWEST" ]; then
       EXT="${NEWEST##*.}"
