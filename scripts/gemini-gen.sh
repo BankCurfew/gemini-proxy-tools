@@ -188,7 +188,15 @@ if [ -n "$RESULT" ]; then
     # call `download_images` (already extracts real <img>/canvas/blob content
     # correctly) and wait on the exact filename it reports back.
     echo "[~] Fetching generated image(s)..."
-    WIN_PROFILE=$(cmd.exe /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r\n')
+    # T2890: Windows PATH is no longer appended in this WSL, so a bare cmd.exe = exit 127 and set -e/pipefail ended the
+    # script silently right here (designer 09:05). Absolute fallback; a real failure says so and how to fix it.
+    CMD_EXE=$(command -v cmd.exe || echo /mnt/c/Windows/System32/cmd.exe)
+    WIN_PROFILE=$(cd /tmp && "$CMD_EXE" /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r\n' || true)
+    if [ -z "$WIN_PROFILE" ]; then
+      echo "[!] cannot read the Windows profile path via $CMD_EXE — image was generated but not downloaded" >&2
+      echo "fix: ls -la /mnt/c/Windows/System32/cmd.exe   (WSL interop must be on), then retry with --keep to re-fetch" >&2
+      exit 1
+    fi
     DL_DIR="$(wslpath "$WIN_PROFILE")/Downloads"
     DL_OK=false
     DL_FILENAME=""
