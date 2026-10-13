@@ -33,7 +33,8 @@
 
 ```
 1. Connect CDP → Chrome (localhost:9222)
-2. Find/open brand chat (BRAND_CHAT_ID)
+2. Take its own slot window (`~/.oracle/tools/cdp-window.mjs` slot L4, pinned; `POSTER_SLOT` to change; T3014 bob DECISION A) and open the brand chat (BRAND_CHAT_ID) in it. Never attaches or opens tabs in แบงค์'s window; released at exit
+   - T3014: everything (incl. `new-chat`) runs in that ONE slot tab. `POSTER_ONE_TAB=0` (old new-tab path) is **ignored** with a log line: a 2nd tab could open in แบงค์'s window. Sends and attach wait up to 45 s (`POSTER_COMPOSER_WAIT_MS`) for ChatGPT's late-mounting composer
 3. Compose prompt from BRAND_TEMPLATE + input
 4. Send → poll for generation complete
 5. Detect: success / refusal / stall

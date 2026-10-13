@@ -35,6 +35,9 @@ let cfg = { ...defaults };
 try {
   const file = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
   cfg = { ...defaults, ...file };
+  // T3014: the test knob must beat the file (poster.config.json sets cdp_url, so a test's fake CDP was silently replaced
+  // by the real Chrome on :9222)
+  if (process.env.POSTER_CDP_URL) cfg.cdp_url = process.env.POSTER_CDP_URL;
 } catch {}
 
 // --brand flag: select active brand (normalised to lowercase)
@@ -309,6 +312,8 @@ function heartbeat(taskId, pct, status) {
 }
 
 let _createdPages = [];
+// T3014: how long a send / attach waits for ChatGPT's late-mounting composer (POSTER_COMPOSER_WAIT_MS = tests)
+const COMPOSER_WAIT_MS = Number(process.env.POSTER_COMPOSER_WAIT_MS) || 45000;
 // T2801 (designer 8 Oct 16:3x, "hangs at connect, no output in 40 s"): during a VideoEditor render the CDP websocket
 // attach stalls (dev probe: puppeteer.connect no answer in 60 s while /json/version answered in 2 ms). protocolTimeout
 // does not cover the attach, so give connect + pages() a deadline and fail as TAB BUSY (exit 75, nothing sent).
@@ -320,51 +325,66 @@ function connectDeadline(p, what) {
   return Promise.race([p, late]).finally(() => clearTimeout(t));
 }
 
-async function connect() {
-  const browser = await connectDeadline(puppeteer.connect({
-    browserURL: cfg.cdp_url,
-    defaultViewport: null,
-    protocolTimeout: cfg.cdp_protocol_timeout,
-  }), 'connect');
-  const pages = await connectDeadline(browser.pages(), 'tab list');
-  const activeChatId = getActiveBrandChatId();
-  // T599: ONLY accept the active brand chat. Never fall back to ANY other chatgpt.com/c/
-  // tab — that is the cross-brand contamination vector (a WB prompt could land in the iAgency chat).
-  let page = pages.find(p => p.url().includes(activeChatId));
+// T3014 (bob 14 Oct, dev diagnosis Dev-Oracle/output/t3014): poster works in its OWN slot window, never in แบงค์'s.
+// browser.pages() attached EVERY tab; background tabs in แบงค์'s window are throttled (Gmail, ChatGPT > 10 s each), so
+// connect hit the 60 s deadline → TAB BUSY. Now: ~/.oracle/tools/cdp-window.mjs getWindow(<slot>) (
+// GR#5 carve-out; L4, see SLOT) finds its window by window id, never attaching แบงค์'s tabs; the brand chat is opened IN the slot.
+// POSTER_SLOT picks another slot · POSTER_CDP_WINDOW = tests only (a fake module, so a test never takes a real slot lock).
+// slot L4 (bob DECISION T3014/poster-slot → A, 14 Oct): pinned by แบงค์, so it has a real window even when Windows sees one
+// monitor; L2 (designer's) is not pinned yet → minimized → throttled. L2 again once it is pinned (later ticket).
+const SLOT = process.env.POSTER_SLOT || 'L4';
+const CDP_WINDOW = process.env.POSTER_CDP_WINDOW || path.join(require('os').homedir(), '.oracle/tools/cdp-window.mjs');
+let _releaseSlot = null;
+async function slotWindow() {
+  process.env.CDP_URL = cfg.cdp_url;   // cdp-window.mjs reads it when imported
+  const { getWindow } = await import(require('url').pathToFileURL(CDP_WINDOW).href);
+  let w;
+  try {
+    w = await connectDeadline(getWindow(SLOT, { waitLockMs: Math.min(30000, CONNECT_MS / 2), protocolTimeout: cfg.cdp_protocol_timeout }), `slot ${SLOT} window`);
+  } catch (e) {
+    // another poster run holds the slot: a retry-later, not a broken session (the lock is per slot, one holder)
+    if (/is held by pid/.test(e.message)) throw new TabBusyError(`TAB BUSY: CDP slot ${SLOT} is in use by another run (${e.message.split(' · ')[0]}): nothing sent, retry later`);
+    throw e;
+  }
+  _releaseSlot = w.release;
+  // T3014 acceptance (designer 14 Oct): with no side display (Windows saw 1 monitor, remote desktop) an unpinned slot is
+  // created MINIMIZED, and Chrome throttles a minimized window like a background tab: every evaluate → TAB BUSY after
+  // 3×30 s. Say so at once instead (nothing sent).
+  if (!w.pinned && !w.bounds) {
+    await _releaseSlot(); _releaseSlot = null;
+    throw new Error(`🚫 SLOT ${SLOT} HAS NO DISPLAY: Windows reports no side monitor, so its window is minimized (Chrome throttles it): nothing sent\n` +
+      `   fix: run with POSTER_SLOT=<a slot pinned in ~/.oracle/state/cdp-slots/layout-bank.json>, or have แบงค์ pin ${SLOT} there`);
+  }
+  return w;
+}
 
-  if (!page) {
-    // T833: the tab may be at chatgpt.com/ home — try navigating an existing ChatGPT tab
-    const chatgptPage = pages.find(p => p.url().includes('chatgpt.com'));
-    if (!chatgptPage) {
-      throw new Error(
-        `🚫 CONNECT FAILED: No ChatGPT tab open in browser.\n` +
-        `   Open https://chatgpt.com/c/${activeChatId} in แบงค์'s Chrome, then retry.`
-      );
-    }
-    console.log(`[connect] ChatGPT tab at ${chatgptPage.url()} — navigating to brand chat...`);
-    // T2197: build the URL from activeChatId. BRAND_CHAT_URL is the bare home URL for brand-exempt
-    // commands (status/images), so navigating there could never contain the chat id and always failed.
-    await chatgptPage.goto(`${cfg.chatgpt_url}/c/${activeChatId}`, { waitUntil: 'domcontentloaded', timeout: 30000 }); await sleep(3000); // T2427: domcontentloaded + 3s (networkidle2 hangs on SSE-heavy chats)
+async function connect() {
+  const activeChatId = getActiveBrandChatId();   // exits on an unknown brand BEFORE the slot is taken
+  const { browser, page } = await slotWindow();
+  // T599: ONLY the active brand chat. The slot tab is ours, so it is navigated to that chat, never to another one.
+  if (!page.url().includes(activeChatId)) {
+    console.log(`[connect] slot ${SLOT} tab at ${page.url()} — opening the brand chat...`);
+    await page.goto(`${cfg.chatgpt_url}/c/${activeChatId}`, { waitUntil: 'domcontentloaded', timeout: 30000 }); await sleep(3000); // T2427: domcontentloaded + 3s (networkidle2 hangs on SSE-heavy chats)
     await sleep(3000);
     // Verify navigation reached the target chat — ChatGPT may redirect to home or new chat
-    if (!chatgptPage.url().includes(activeChatId)) {
+    if (!page.url().includes(activeChatId)) {
       throw new Error(
-        `🚫 CONNECT FAILED: Navigated to brand chat but landed at ${chatgptPage.url()}\n` +
+        `🚫 CONNECT FAILED: Navigated to brand chat but landed at ${page.url()}\n` +
         `   Expected URL to contain: ${activeChatId.slice(0, 8)}...\n` +
         `   The chat may have been deleted or the session expired.\n` +
-        `   Fix: open https://chatgpt.com/c/${activeChatId} manually, or run: node poster.js new-chat --brand ${BRAND_FLAG}`
+        `   Fix: check the ChatGPT login in the slot ${SLOT} window, or run: node poster.js new-chat --brand ${BRAND_FLAG}`
       );
     }
-    page = chatgptPage;
   }
-
   return { browser, page: guardTab(page) };
 }
 
+// new-chat / rename: any ChatGPT page will do → the slot tab, opened at ChatGPT home if it is elsewhere
 async function connectAnyChatgptTab() {
-  const browser = await connectDeadline(puppeteer.connect({ browserURL: cfg.cdp_url, defaultViewport: null, protocolTimeout: cfg.cdp_protocol_timeout }), 'connect');
-  const page = (await browser.pages()).find(p => p.url().includes('chatgpt.com'));
-  if (!page) throw new Error(`🚫 CONNECT FAILED: No ChatGPT tab open in browser. Open ONE https://chatgpt.com/ tab, then retry.`);
+  const { browser, page } = await slotWindow();
+  if (!page.url().includes('chatgpt.com')) {
+    await page.goto(`${cfg.chatgpt_url}/`, { waitUntil: 'domcontentloaded', timeout: 30000 }); await sleep(3000);
+  }
   return { browser, page: guardTab(page) };
 }
 
@@ -693,6 +713,9 @@ async function sendAndConfirm(page, text, opts = {}) {
   const label = opts.label || 'send';
   await waitRenderIdle(label);
   await installComposerFinder(page);
+  // T3014 (designer 14 Oct, new-chat 2/2 "no visible composer"): ChatGPT mounts the composer late (fresh home page, long
+  // image chat). Wait until it is there and idle BEFORE the first attempt, not only after a reload; a ready page passes at once.
+  if (!(await waitChatReady(page, COMPOSER_WAIT_MS))) console.error(`[${label}] composer not ready after ${Math.round(COMPOSER_WAIT_MS / 1000)} s — trying anyway`);
   const before = await lastUser(page); // newest user message BEFORE any attempt: the reload check must see a NEW one
   const first = await sendOnce(page, text, opts);
   if (first === 'confirmed') return true;
@@ -802,8 +825,11 @@ async function browserPath(page, f) {
 // Success = one 200 from /backend-api/files/process_upload_stream per file (the upload finished server-side).
 // The "Remove <file>" button is NOT a success signal: it renders on a failed chip too.
 async function attachFiles(page, files) {
+  // T3014 (designer 14 Oct, 3 fails "no file input"): ChatGPT mounts the composer form late on a long image chat (probe: no
+  // form at all, then 4 file inputs minutes later, no click needed). Wait for it instead of checking once.
+  await page.waitForSelector('form input[type="file"]', { timeout: COMPOSER_WAIT_MS }).catch(() => null);
   const input = await page.$('form input[type="file"][accept="image/*"]') || await page.$('form input[type="file"]');
-  if (!input) { console.error('🚫 attach: no file input in the composer'); return false; }
+  if (!input) { console.error(`🚫 attach: no file input in the composer after ${Math.round(COMPOSER_WAIT_MS / 1000)} s (chat still loading, or ChatGPT changed the composer)`); return false; }
   let processed = 0;
   const onRes = (r) => { if (r.url().includes('/backend-api/files/process_upload_stream') && r.status() === 200) processed++; };
   page.on('response', onRes);
@@ -1467,21 +1493,11 @@ async function newChat(page, rawBrandName) {
   const brandName = rawBrandName.toLowerCase();
   console.log(`[new-chat] Creating new ChatGPT chat for brand: ${brandName}`);
 
-  // T2406 (แบงค์ '1 tab'): POSTER_ONE_TAB=1 reuses the connected ChatGPT tab (same-tab navigation) instead of
-  // opening a second one. Default (flag unset) keeps the old new-tab path until the 3/3 acceptance switch-over.
-  // T2406: one-tab is now the DEFAULT (designer verified 3/3 + Dalio live run, bob GO 1 Oct).
-  // Set POSTER_ONE_TAB=0 to revert to the old new-tab path.
-  const oneTab = process.env.POSTER_ONE_TAB !== '0';
-  let newPage;
-  if (oneTab) {
-    newPage = page;
-    console.log('[new-chat] POSTER_ONE_TAB=1: reusing the existing ChatGPT tab (no new tab)');
-  } else {
-    // Open a NEW tab — bypass connect() which reuses existing ChatGPT tab
-    newPage = guardTab(await page.browser().newPage());   // T2753
-    _createdPages.push(newPage);
-  }
-  const dropPage = async () => { if (!oneTab) await newPage.close(); };   // never close the one shared tab
+  // T2406 (แบงค์ '1 tab'): reuse the connected ChatGPT tab (same-tab navigation). T3014: that tab is the slot tab, and
+  // the old new-tab path (POSTER_ONE_TAB=0) is gone: Chrome could open a 2nd tab in แบงค์'s window.
+  if (process.env.POSTER_ONE_TAB === '0') console.log('[new-chat] POSTER_ONE_TAB=0 ignored (T3014): the slot tab is reused');
+  const newPage = page;
+  const dropPage = async () => {};   // never close the slot tab
 
   // Navigate to chatgpt.com home (fresh chat state)
   await newPage.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 30000 }); await sleep(3000);
@@ -1574,12 +1590,16 @@ async function newChat(page, rawBrandName) {
   // Save to config
   if (!cfg.brands) cfg.brands = {};
   cfg.brands[brandName] = { chat_id: chatId, created: new Date().toISOString() };
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf-8');
+  // T3014: write the FILE's own content + this brand, never the merged cfg (that re-persisted code defaults, see 138af77,
+  // and would persist an env override such as POSTER_CDP_URL)
+  const onDisk = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')) : {};
+  onDisk.brands = { ...(onDisk.brands || {}), [brandName]: cfg.brands[brandName] };
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(onDisk, null, 2), 'utf-8');
   console.log(`[new-chat] Saved to poster.config.json: brands.${brandName}.chat_id = ${chatId}`);
   console.log(`\n✅ Brand "${brandName}" ready. Use: node poster.js generate <type> <brief> --brand ${brandName}`);
 
   // The tab is closed by cleanupCreatedPages() on exit; connect() opens the chat by id next run (T2197).
-  console.log(`[new-chat] Chat saved server-side at: ${newPage.url()} (${oneTab ? 'same tab, stays open' : 'this tab closes on exit'})`);
+  console.log(`[new-chat] Chat saved server-side at: ${newPage.url()} (slot tab, stays open)`);
 }
 
 function stripFlags(argv) {
@@ -1774,7 +1794,7 @@ Examples:
     }
   } finally {
     await cleanupCreatedPages();
-    browser.disconnect();
+    if (_releaseSlot) await _releaseSlot(); else browser.disconnect();   // T3014: release = close stray tabs IN the slot, drop the lock, disconnect
   }
 }
 
@@ -1790,4 +1810,4 @@ if (require.main === module) main()
     if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(EXIT_TAB_BUSY); }
     console.error('ERROR:', e.message); process.exit(1);
   });   // T2790: requirable by test/t2790-stalled-send.test.js
-module.exports = { sendAndConfirm, installComposerFinder, liveRenders };
+module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles };   // T3014: attachFiles for test/t3014-attach-wait

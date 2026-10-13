@@ -9,12 +9,15 @@
 const os = require('os'); const fs = require('fs'); const path = require('path'); const http = require('http');
 const { spawn, spawnSync } = require('child_process');
 const POSTER = path.join(__dirname, '..', 'scripts', 'poster.js');
+// a real configured brand: connect resolves the brand chat BEFORE it connects (T3014), so status needs one here
+const BRAND = Object.keys(JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'poster.config.json'), 'utf8')).brands)[0];
 const results = []; const check = (n, ok, d) => { results.push(ok); console.log(`${ok ? 'PASS' : 'FAIL'} ${n}${d ? ' — ' + d : ''}`); };
+const FAKE_WIN = path.join(__dirname, 'fixtures', 'fake-cdp-window.mjs');   // T3014: never the real slot module in a test
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 't2801-render-'));
 const EMPTY = fs.mkdtempSync(path.join(os.tmpdir(), 't2801-norender-'));
 const run = (env, ms) => new Promise((res) => {
   const t = Date.now(); let out = '';
-  const c = spawn('node', [POSTER, 'status'], { env: { ...process.env, ...env } });
+  const c = spawn('node', [POSTER, 'status', '--brand', BRAND], { env: { ...process.env, POSTER_CDP_WINDOW: FAKE_WIN, ...env } });
   c.stdout.on('data', (d) => out += d); c.stderr.on('data', (d) => out += d);
   const kill = setTimeout(() => c.kill('SIGKILL'), ms);
   c.on('exit', (code, sig) => { clearTimeout(kill); res({ code, sig, out, ms: Date.now() - t }); });
@@ -38,7 +41,7 @@ const run = (env, ms) => new Promise((res) => {
   const url = `http://127.0.0.1:${srv.address().port}`;
   const b = await run({ POSTER_RENDER_DIR: EMPTY, POSTER_CDP_URL: url, POSTER_CONNECT_MS: '2000' }, 20000);
   check('B stalled CDP: exit 75 within the deadline', b.code === 75 && b.ms < 10000, `code ${b.code} sig ${b.sig} ${b.ms} ms`);
-  check('B stalled CDP: says why', /TAB BUSY: Chrome CDP (connect|tab list) gave no answer in 2 s/.test(b.out), b.out.trim().split('\n').pop().slice(0, 110));
+  check('B stalled CDP: says why', /TAB BUSY: Chrome CDP (connect|tab list|slot L4 window) gave no answer in 2 s/.test(b.out), b.out.trim().split('\n').pop().slice(0, 110));
   // C: same fake, deadline far away → still running at 6 s (proves B's exit came from the deadline, not the fake)
   const c = await run({ POSTER_RENDER_DIR: EMPTY, POSTER_CDP_URL: url, POSTER_CONNECT_MS: '600000' }, 6000);
   check('C positive control: without the deadline it hangs (killed at 6 s)', c.sig === 'SIGKILL', `code ${c.code} sig ${c.sig}`);
