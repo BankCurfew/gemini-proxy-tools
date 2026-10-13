@@ -35,6 +35,9 @@ let cfg = { ...defaults };
 try {
   const file = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
   cfg = { ...defaults, ...file };
+  // T3014: the test knob must beat the file (poster.config.json sets cdp_url, so a test's fake CDP was silently replaced
+  // by the real Chrome on :9222)
+  if (process.env.POSTER_CDP_URL) cfg.cdp_url = process.env.POSTER_CDP_URL;
 } catch {}
 
 // --brand flag: select active brand (normalised to lowercase)
@@ -320,51 +323,56 @@ function connectDeadline(p, what) {
   return Promise.race([p, late]).finally(() => clearTimeout(t));
 }
 
-async function connect() {
-  const browser = await connectDeadline(puppeteer.connect({
-    browserURL: cfg.cdp_url,
-    defaultViewport: null,
-    protocolTimeout: cfg.cdp_protocol_timeout,
-  }), 'connect');
-  const pages = await connectDeadline(browser.pages(), 'tab list');
-  const activeChatId = getActiveBrandChatId();
-  // T599: ONLY accept the active brand chat. Never fall back to ANY other chatgpt.com/c/
-  // tab — that is the cross-brand contamination vector (a WB prompt could land in the iAgency chat).
-  let page = pages.find(p => p.url().includes(activeChatId));
+// T3014 (bob 14 Oct, dev diagnosis Dev-Oracle/output/t3014): poster works in its OWN slot window, never in แบงค์'s.
+// browser.pages() attached EVERY tab; background tabs in แบงค์'s window are throttled (Gmail, ChatGPT > 10 s each), so
+// connect hit the 60 s deadline → TAB BUSY. Now: ~/.oracle/tools/cdp-window.mjs getWindow(<slot>) (designer slot L2,
+// GR#5 carve-out) finds its window by window id, never attaching แบงค์'s tabs; the brand chat is opened IN the slot.
+// POSTER_SLOT picks another slot · POSTER_CDP_WINDOW = tests only (a fake module, so a test never takes a real slot lock).
+const SLOT = process.env.POSTER_SLOT || 'L2';
+const CDP_WINDOW = process.env.POSTER_CDP_WINDOW || path.join(require('os').homedir(), '.oracle/tools/cdp-window.mjs');
+let _releaseSlot = null;
+async function slotWindow() {
+  process.env.CDP_URL = cfg.cdp_url;   // cdp-window.mjs reads it when imported
+  const { getWindow } = await import(require('url').pathToFileURL(CDP_WINDOW).href);
+  let w;
+  try {
+    w = await connectDeadline(getWindow(SLOT, { waitLockMs: Math.min(30000, CONNECT_MS / 2), protocolTimeout: cfg.cdp_protocol_timeout }), `slot ${SLOT} window`);
+  } catch (e) {
+    // another poster run holds the slot: a retry-later, not a broken session (the lock is per slot, one holder)
+    if (/is held by pid/.test(e.message)) throw new TabBusyError(`TAB BUSY: CDP slot ${SLOT} is in use by another run (${e.message.split(' · ')[0]}): nothing sent, retry later`);
+    throw e;
+  }
+  _releaseSlot = w.release;
+  return w;
+}
 
-  if (!page) {
-    // T833: the tab may be at chatgpt.com/ home — try navigating an existing ChatGPT tab
-    const chatgptPage = pages.find(p => p.url().includes('chatgpt.com'));
-    if (!chatgptPage) {
-      throw new Error(
-        `🚫 CONNECT FAILED: No ChatGPT tab open in browser.\n` +
-        `   Open https://chatgpt.com/c/${activeChatId} in แบงค์'s Chrome, then retry.`
-      );
-    }
-    console.log(`[connect] ChatGPT tab at ${chatgptPage.url()} — navigating to brand chat...`);
-    // T2197: build the URL from activeChatId. BRAND_CHAT_URL is the bare home URL for brand-exempt
-    // commands (status/images), so navigating there could never contain the chat id and always failed.
-    await chatgptPage.goto(`${cfg.chatgpt_url}/c/${activeChatId}`, { waitUntil: 'domcontentloaded', timeout: 30000 }); await sleep(3000); // T2427: domcontentloaded + 3s (networkidle2 hangs on SSE-heavy chats)
+async function connect() {
+  const activeChatId = getActiveBrandChatId();   // exits on an unknown brand BEFORE the slot is taken
+  const { browser, page } = await slotWindow();
+  // T599: ONLY the active brand chat. The slot tab is ours, so it is navigated to that chat, never to another one.
+  if (!page.url().includes(activeChatId)) {
+    console.log(`[connect] slot ${SLOT} tab at ${page.url()} — opening the brand chat...`);
+    await page.goto(`${cfg.chatgpt_url}/c/${activeChatId}`, { waitUntil: 'domcontentloaded', timeout: 30000 }); await sleep(3000); // T2427: domcontentloaded + 3s (networkidle2 hangs on SSE-heavy chats)
     await sleep(3000);
     // Verify navigation reached the target chat — ChatGPT may redirect to home or new chat
-    if (!chatgptPage.url().includes(activeChatId)) {
+    if (!page.url().includes(activeChatId)) {
       throw new Error(
-        `🚫 CONNECT FAILED: Navigated to brand chat but landed at ${chatgptPage.url()}\n` +
+        `🚫 CONNECT FAILED: Navigated to brand chat but landed at ${page.url()}\n` +
         `   Expected URL to contain: ${activeChatId.slice(0, 8)}...\n` +
         `   The chat may have been deleted or the session expired.\n` +
-        `   Fix: open https://chatgpt.com/c/${activeChatId} manually, or run: node poster.js new-chat --brand ${BRAND_FLAG}`
+        `   Fix: check the ChatGPT login in the slot ${SLOT} window, or run: node poster.js new-chat --brand ${BRAND_FLAG}`
       );
     }
-    page = chatgptPage;
   }
-
   return { browser, page: guardTab(page) };
 }
 
+// new-chat / rename: any ChatGPT page will do → the slot tab, opened at ChatGPT home if it is elsewhere
 async function connectAnyChatgptTab() {
-  const browser = await connectDeadline(puppeteer.connect({ browserURL: cfg.cdp_url, defaultViewport: null, protocolTimeout: cfg.cdp_protocol_timeout }), 'connect');
-  const page = (await browser.pages()).find(p => p.url().includes('chatgpt.com'));
-  if (!page) throw new Error(`🚫 CONNECT FAILED: No ChatGPT tab open in browser. Open ONE https://chatgpt.com/ tab, then retry.`);
+  const { browser, page } = await slotWindow();
+  if (!page.url().includes('chatgpt.com')) {
+    await page.goto(`${cfg.chatgpt_url}/`, { waitUntil: 'domcontentloaded', timeout: 30000 }); await sleep(3000);
+  }
   return { browser, page: guardTab(page) };
 }
 
@@ -1467,21 +1475,11 @@ async function newChat(page, rawBrandName) {
   const brandName = rawBrandName.toLowerCase();
   console.log(`[new-chat] Creating new ChatGPT chat for brand: ${brandName}`);
 
-  // T2406 (แบงค์ '1 tab'): POSTER_ONE_TAB=1 reuses the connected ChatGPT tab (same-tab navigation) instead of
-  // opening a second one. Default (flag unset) keeps the old new-tab path until the 3/3 acceptance switch-over.
-  // T2406: one-tab is now the DEFAULT (designer verified 3/3 + Dalio live run, bob GO 1 Oct).
-  // Set POSTER_ONE_TAB=0 to revert to the old new-tab path.
-  const oneTab = process.env.POSTER_ONE_TAB !== '0';
-  let newPage;
-  if (oneTab) {
-    newPage = page;
-    console.log('[new-chat] POSTER_ONE_TAB=1: reusing the existing ChatGPT tab (no new tab)');
-  } else {
-    // Open a NEW tab — bypass connect() which reuses existing ChatGPT tab
-    newPage = guardTab(await page.browser().newPage());   // T2753
-    _createdPages.push(newPage);
-  }
-  const dropPage = async () => { if (!oneTab) await newPage.close(); };   // never close the one shared tab
+  // T2406 (แบงค์ '1 tab'): reuse the connected ChatGPT tab (same-tab navigation). T3014: that tab is the slot tab, and
+  // the old new-tab path (POSTER_ONE_TAB=0) is gone: Chrome could open a 2nd tab in แบงค์'s window.
+  if (process.env.POSTER_ONE_TAB === '0') console.log('[new-chat] POSTER_ONE_TAB=0 ignored (T3014): the slot tab is reused');
+  const newPage = page;
+  const dropPage = async () => {};   // never close the slot tab
 
   // Navigate to chatgpt.com home (fresh chat state)
   await newPage.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 30000 }); await sleep(3000);
@@ -1774,7 +1772,7 @@ Examples:
     }
   } finally {
     await cleanupCreatedPages();
-    browser.disconnect();
+    if (_releaseSlot) await _releaseSlot(); else browser.disconnect();   // T3014: release = close stray tabs IN the slot, drop the lock, disconnect
   }
 }
 
