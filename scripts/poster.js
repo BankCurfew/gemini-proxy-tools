@@ -312,6 +312,8 @@ function heartbeat(taskId, pct, status) {
 }
 
 let _createdPages = [];
+// T3014: how long a send / attach waits for ChatGPT's late-mounting composer (POSTER_COMPOSER_WAIT_MS = tests)
+const COMPOSER_WAIT_MS = Number(process.env.POSTER_COMPOSER_WAIT_MS) || 45000;
 // T2801 (designer 8 Oct 16:3x, "hangs at connect, no output in 40 s"): during a VideoEditor render the CDP websocket
 // attach stalls (dev probe: puppeteer.connect no answer in 60 s while /json/version answered in 2 ms). protocolTimeout
 // does not cover the attach, so give connect + pages() a deadline and fail as TAB BUSY (exit 75, nothing sent).
@@ -711,6 +713,9 @@ async function sendAndConfirm(page, text, opts = {}) {
   const label = opts.label || 'send';
   await waitRenderIdle(label);
   await installComposerFinder(page);
+  // T3014 (designer 14 Oct, new-chat 2/2 "no visible composer"): ChatGPT mounts the composer late (fresh home page, long
+  // image chat). Wait until it is there and idle BEFORE the first attempt, not only after a reload; a ready page passes at once.
+  if (!(await waitChatReady(page, COMPOSER_WAIT_MS))) console.error(`[${label}] composer not ready after ${Math.round(COMPOSER_WAIT_MS / 1000)} s — trying anyway`);
   const before = await lastUser(page); // newest user message BEFORE any attempt: the reload check must see a NEW one
   const first = await sendOnce(page, text, opts);
   if (first === 'confirmed') return true;
@@ -822,10 +827,9 @@ async function browserPath(page, f) {
 async function attachFiles(page, files) {
   // T3014 (designer 14 Oct, 3 fails "no file input"): ChatGPT mounts the composer form late on a long image chat (probe: no
   // form at all, then 4 file inputs minutes later, no click needed). Wait for it instead of checking once.
-  const ATTACH_WAIT_MS = Number(process.env.POSTER_ATTACH_WAIT_MS) || 45000;
-  await page.waitForSelector('form input[type="file"]', { timeout: ATTACH_WAIT_MS }).catch(() => null);
+  await page.waitForSelector('form input[type="file"]', { timeout: COMPOSER_WAIT_MS }).catch(() => null);
   const input = await page.$('form input[type="file"][accept="image/*"]') || await page.$('form input[type="file"]');
-  if (!input) { console.error(`🚫 attach: no file input in the composer after ${Math.round(ATTACH_WAIT_MS / 1000)} s (chat still loading, or ChatGPT changed the composer)`); return false; }
+  if (!input) { console.error(`🚫 attach: no file input in the composer after ${Math.round(COMPOSER_WAIT_MS / 1000)} s (chat still loading, or ChatGPT changed the composer)`); return false; }
   let processed = 0;
   const onRes = (r) => { if (r.url().includes('/backend-api/files/process_upload_stream') && r.status() === 200) processed++; };
   page.on('response', onRes);
