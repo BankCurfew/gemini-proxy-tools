@@ -820,8 +820,12 @@ async function browserPath(page, f) {
 // Success = one 200 from /backend-api/files/process_upload_stream per file (the upload finished server-side).
 // The "Remove <file>" button is NOT a success signal: it renders on a failed chip too.
 async function attachFiles(page, files) {
+  // T3014 (designer 14 Oct, 3 fails "no file input"): ChatGPT mounts the composer form late on a long image chat (probe: no
+  // form at all, then 4 file inputs minutes later, no click needed). Wait for it instead of checking once.
+  const ATTACH_WAIT_MS = Number(process.env.POSTER_ATTACH_WAIT_MS) || 45000;
+  await page.waitForSelector('form input[type="file"]', { timeout: ATTACH_WAIT_MS }).catch(() => null);
   const input = await page.$('form input[type="file"][accept="image/*"]') || await page.$('form input[type="file"]');
-  if (!input) { console.error('🚫 attach: no file input in the composer'); return false; }
+  if (!input) { console.error(`🚫 attach: no file input in the composer after ${Math.round(ATTACH_WAIT_MS / 1000)} s (chat still loading, or ChatGPT changed the composer)`); return false; }
   let processed = 0;
   const onRes = (r) => { if (r.url().includes('/backend-api/files/process_upload_stream') && r.status() === 200) processed++; };
   page.on('response', onRes);
@@ -1798,4 +1802,4 @@ if (require.main === module) main()
     if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(EXIT_TAB_BUSY); }
     console.error('ERROR:', e.message); process.exit(1);
   });   // T2790: requirable by test/t2790-stalled-send.test.js
-module.exports = { sendAndConfirm, installComposerFinder, liveRenders };
+module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles };   // T3014: attachFiles for test/t3014-attach-wait
