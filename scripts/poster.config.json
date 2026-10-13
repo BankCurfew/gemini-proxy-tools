@@ -5,6 +5,9 @@
   "downloads_dir": "/mnt/c/Users/mbank/Downloads",
   "cdp_url": "http://127.0.0.1:9222",
   "cdp_protocol_timeout": 300000,
+  "tab_call_timeout_ms": 30000,
+  "tab_busy_windows": 3,
+  "render_wait_ms": 900000,
   "generation_timeout_ms": 180000,
   "poll_interval_ms": 5000,
   "stall_threshold_polls": 6,
@@ -134,6 +137,14 @@
       "title": "MASCOT-WE · 2026-10",
       "set_by": "designer (bob order 21:0x, แบงค์: separate chat from วิง)",
       "note": "ONE chat for น้อง We (WeWealth Advisory) renders; never วิง/iAgencyAIA in this chat"
+    },
+    "bank-character": {
+      "chat_id": "6ace0a08-bbc8-83ec-a94c-85c8be78be13",
+      "created": "2026-10-13T10:38:03.446Z",
+      "title": "แบงค์ character",
+      "set_by": "designer T3002 (bob/แบงค์ order 13/10: DALL-E character model of แบงค์)",
+      "note": "ONE chat for แบงค์'s character turnaround sheets; no posters, no other people",
+      "base_brand": "wealthbanks"
     }
   },
   "archived": {
