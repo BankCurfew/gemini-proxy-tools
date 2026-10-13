@@ -731,7 +731,7 @@ async function sendAndConfirm(page, text, opts = {}) {
   // until the chat is ready, and only resend if our message is NOT already the newest user turn (never double-send).
   console.error(`[${label}] retrying once after reload (${first})`);
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-  await waitChatReady(page, 45000);
+  await waitChatReady(page, COMPOSER_WAIT_MS);   // T3014 Editor: the same knob as the first-attempt wait
   await installComposerFinder(page);
   const now = await lastUser(page);
   if (now.id && now.id !== before.id && sameText(now.text, text)) {

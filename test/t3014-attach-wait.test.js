@@ -24,16 +24,16 @@ const capture = async (fn) => { const orig = console.error; let err = ''; consol
   const c = await capture(() => attachFiles(there, ['/x/a.png']).catch((e) => e.message));
   check('C input present → no "no file input", upload path reached', !/no file input/.test(c.err) && /upload reached|browserPath|ENOENT|wslpath/i.test(String(c.r) + c.err), String(c.r).slice(0, 80));
   // D (new-chat 2/2 "no visible composer"): sendAndConfirm polls the composer-ready check BEFORE its first send step
-  const seen = []; let t1 = Date.now();
+  const seen = [];
   const late = { evaluate: async (fn) => {
     const src = typeof fn === 'function' ? fn.toString() : 'install';
     if (src === 'install') return;
-    if (/__posterComposer\(\) && !window.__posterBusy\(\)/.test(src)) { seen.push('ready?'); return Date.now() - t1 > 1500; }
+    if (/__posterComposer\(\) && !window.__posterBusy\(\)/.test(src)) { seen.push('ready?'); return seen.length >= 2; }   // ready on the 2nd poll: by count, not wall time (a loaded box flaked 1/20 when >1.5 s passed before poll 1)
     seen.push('send-step'); throw new Error('stop after first send step');
   } };
-  t1 = Date.now(); await sendAndConfirm(late, 'seed', { label: 'new-chat' }).catch(() => {});
+  await sendAndConfirm(late, 'seed', { label: 'new-chat' }).catch(() => {});
   const firstSend = seen.indexOf('send-step');
-  check('D send waits for the late composer before its first send step (polled until ready)', firstSend > 1 && seen.slice(0, firstSend).every((x) => x === 'ready?'), seen.slice(0, 6).join(','));
+  check('D send waits for the late composer before its first send step (polled until ready)', firstSend === 2 && seen[0] === 'ready?' && seen[1] === 'ready?', seen.slice(0, 6).join(','));
   const pass = results.filter(Boolean).length; console.log(`T3014-attach ${pass}/${results.length} ${pass === results.length ? 'PASS' : 'FAIL'}`);
   process.exit(pass === results.length ? 0 : 1);
 })().catch((e) => { console.error('ERROR', e); process.exit(2); });
