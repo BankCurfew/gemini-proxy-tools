@@ -33,7 +33,7 @@
 
 ```
 1. Connect CDP → Chrome (localhost:9222)
-2. Take its own slot window (`~/.oracle/tools/cdp-window.mjs` slot L2, `POSTER_SLOT` to change; T3014) and open the brand chat (BRAND_CHAT_ID) in it. Never attaches or opens tabs in แบงค์'s window; released at exit
+2. Take its own slot window (`~/.oracle/tools/cdp-window.mjs` slot L4, pinned; `POSTER_SLOT` to change; T3014 bob DECISION A) and open the brand chat (BRAND_CHAT_ID) in it. Never attaches or opens tabs in แบงค์'s window; released at exit
 3. Compose prompt from BRAND_TEMPLATE + input
 4. Send → poll for generation complete
 5. Detect: success / refusal / stall

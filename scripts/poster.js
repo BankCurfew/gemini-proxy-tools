@@ -325,10 +325,12 @@ function connectDeadline(p, what) {
 
 // T3014 (bob 14 Oct, dev diagnosis Dev-Oracle/output/t3014): poster works in its OWN slot window, never in แบงค์'s.
 // browser.pages() attached EVERY tab; background tabs in แบงค์'s window are throttled (Gmail, ChatGPT > 10 s each), so
-// connect hit the 60 s deadline → TAB BUSY. Now: ~/.oracle/tools/cdp-window.mjs getWindow(<slot>) (designer slot L2,
-// GR#5 carve-out) finds its window by window id, never attaching แบงค์'s tabs; the brand chat is opened IN the slot.
+// connect hit the 60 s deadline → TAB BUSY. Now: ~/.oracle/tools/cdp-window.mjs getWindow(<slot>) (
+// GR#5 carve-out; L4, see SLOT) finds its window by window id, never attaching แบงค์'s tabs; the brand chat is opened IN the slot.
 // POSTER_SLOT picks another slot · POSTER_CDP_WINDOW = tests only (a fake module, so a test never takes a real slot lock).
-const SLOT = process.env.POSTER_SLOT || 'L2';
+// slot L4 (bob DECISION T3014/poster-slot → A, 14 Oct): pinned by แบงค์, so it has a real window even when Windows sees one
+// monitor; L2 (designer's) is not pinned yet → minimized → throttled. L2 again once it is pinned (later ticket).
+const SLOT = process.env.POSTER_SLOT || 'L4';
 const CDP_WINDOW = process.env.POSTER_CDP_WINDOW || path.join(require('os').homedir(), '.oracle/tools/cdp-window.mjs');
 let _releaseSlot = null;
 async function slotWindow() {

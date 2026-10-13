@@ -41,7 +41,7 @@ const run = (env, ms) => new Promise((res) => {
   const url = `http://127.0.0.1:${srv.address().port}`;
   const b = await run({ POSTER_RENDER_DIR: EMPTY, POSTER_CDP_URL: url, POSTER_CONNECT_MS: '2000' }, 20000);
   check('B stalled CDP: exit 75 within the deadline', b.code === 75 && b.ms < 10000, `code ${b.code} sig ${b.sig} ${b.ms} ms`);
-  check('B stalled CDP: says why', /TAB BUSY: Chrome CDP (connect|tab list|slot L2 window) gave no answer in 2 s/.test(b.out), b.out.trim().split('\n').pop().slice(0, 110));
+  check('B stalled CDP: says why', /TAB BUSY: Chrome CDP (connect|tab list|slot L4 window) gave no answer in 2 s/.test(b.out), b.out.trim().split('\n').pop().slice(0, 110));
   // C: same fake, deadline far away → still running at 6 s (proves B's exit came from the deadline, not the fake)
   const c = await run({ POSTER_RENDER_DIR: EMPTY, POSTER_CDP_URL: url, POSTER_CONNECT_MS: '600000' }, 6000);
   check('C positive control: without the deadline it hangs (killed at 6 s)', c.sig === 'SIGKILL', `code ${c.code} sig ${c.sig}`);
