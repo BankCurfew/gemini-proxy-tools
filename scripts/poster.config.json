@@ -142,6 +142,14 @@
       "set_by": "designer T3002 (bob/แบงค์ order 13/10: DALL-E character model of แบงค์)",
       "note": "ONE chat for แบงค์'s character turnaround sheets; no posters, no other people",
       "base_brand": "wealthbanks"
+    },
+    "wb-entrepreneur-tax": {
+      "chat_id": "6ace7256-06c8-83ec-aacd-d5629ae164d7",
+      "created": "2026-10-13T18:03:03.602Z",
+      "title": "WB entrepreneur tax deck",
+      "base_brand": "wealthbanks",
+      "set_by": "designer T3014 (bob order 14/10: dedicated project chat for the 3-slide deck)",
+      "note": "ONE chat for the T3014 entrepreneur tax deck slides; never posters/covers"
     }
   },
   "archived": {

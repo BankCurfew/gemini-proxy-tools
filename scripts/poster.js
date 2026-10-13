@@ -1590,12 +1590,16 @@ async function newChat(page, rawBrandName) {
   // Save to config
   if (!cfg.brands) cfg.brands = {};
   cfg.brands[brandName] = { chat_id: chatId, created: new Date().toISOString() };
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf-8');
+  // T3014: write the FILE's own content + this brand, never the merged cfg (that re-persisted code defaults, see 138af77,
+  // and would persist an env override such as POSTER_CDP_URL)
+  const onDisk = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')) : {};
+  onDisk.brands = { ...(onDisk.brands || {}), [brandName]: cfg.brands[brandName] };
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(onDisk, null, 2), 'utf-8');
   console.log(`[new-chat] Saved to poster.config.json: brands.${brandName}.chat_id = ${chatId}`);
   console.log(`\n✅ Brand "${brandName}" ready. Use: node poster.js generate <type> <brief> --brand ${brandName}`);
 
   // The tab is closed by cleanupCreatedPages() on exit; connect() opens the chat by id next run (T2197).
-  console.log(`[new-chat] Chat saved server-side at: ${newPage.url()} (${oneTab ? 'same tab, stays open' : 'this tab closes on exit'})`);
+  console.log(`[new-chat] Chat saved server-side at: ${newPage.url()} (slot tab, stays open)`);
 }
 
 function stripFlags(argv) {
