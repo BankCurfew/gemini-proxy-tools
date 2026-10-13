@@ -343,6 +343,14 @@ async function slotWindow() {
     throw e;
   }
   _releaseSlot = w.release;
+  // T3014 acceptance (designer 14 Oct): with no side display (Windows saw 1 monitor, remote desktop) an unpinned slot is
+  // created MINIMIZED, and Chrome throttles a minimized window like a background tab: every evaluate → TAB BUSY after
+  // 3×30 s. Say so at once instead (nothing sent).
+  if (!w.pinned && !w.bounds) {
+    await _releaseSlot(); _releaseSlot = null;
+    throw new Error(`🚫 SLOT ${SLOT} HAS NO DISPLAY: Windows reports no side monitor, so its window is minimized (Chrome throttles it): nothing sent\n` +
+      `   fix: run with POSTER_SLOT=<a slot pinned in ~/.oracle/state/cdp-slots/layout-bank.json>, or have แบงค์ pin ${SLOT} there`);
+  }
   return w;
 }
 
