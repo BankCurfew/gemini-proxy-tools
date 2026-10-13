@@ -87,7 +87,7 @@ const check = (name, ok, detail) => { results.push(ok); console.log(`${ok ? 'PAS
     // T3016 accept (bob): the tabs outside the slot window are exactly the ones that were there before the run
     const after = await others().catch(() => null);
     check(`tabs outside slot ${SLOT} unchanged (${before.length} before)`, !!after && JSON.stringify(after) === JSON.stringify(before), after ? `${after.length} after` : 'unreadable');
-    await w.release();   // closes stray tabs IN the slot window only, drops the slot lock, disconnects
+    await w.release({ blank: true });   // back to about:blank (dev #52 nit: never leave L4 on the decoy url); closes stray tabs IN the slot window only, drops the slot lock, disconnects
     try { fs.unlinkSync(log); } catch {}
   }
   // 6. exit code: TAB BUSY has its own code (75), not 4 (= T599 cross-brand ABORT), and 75 means nothing else
