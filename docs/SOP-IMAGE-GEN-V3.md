@@ -10,11 +10,15 @@
 
 ## Decision Matrix — Which Tool When
 
+> **14 Oct 2026 (แบงค์, T3030): Gemini is dropped. AI image gen = `poster.js` / skill `/poster` (CDP → ChatGPT DALL-E) ONLY.**
+> `gemini-gen.sh` and `chatgpt-gen.sh` are **not** fallbacks: both ride the MQTT browser-proxy extension, which stalls every command
+> (`chrome.storage.local.set` hangs, claude-browser-proxy `background.js:165`). The struck-through cells below are history.
+
 | Use Case | PRIMARY | FALLBACK | Notes |
 |----------|---------|----------|-------|
-| **Brand posters** (iAgencyAIA marketing, social media) | `poster.js` (CDP/ChatGPT DALL-E) | MQTT gemini-gen.sh | poster.js has brand template, logo memory, 9:16 format |
-| **News hero images** (daily news, concepts) | HTML template + Chrome headless | Gemini via gemini-gen.sh | Real photos preferred for real events per Designer conduct |
-| **General AI images** (one-off, non-branded) | `gemini-gen.sh` (MQTT) | poster.js or OpenAI API | For quick gen without brand requirements |
+| **Brand posters** (iAgencyAIA marketing, social media) | `poster.js` (CDP/ChatGPT DALL-E) | none · ~~MQTT gemini-gen.sh~~ | poster.js has brand template, logo memory, 9:16 format |
+| **News hero images** (daily news, concepts) | HTML template + Chrome headless | `poster.js` · ~~Gemini via gemini-gen.sh~~ | Real photos preferred for real events per Designer conduct |
+| **General AI images** (one-off, non-branded) | `poster.js` / `/poster` · ~~`gemini-gen.sh` (MQTT)~~ | OpenAI API (Tier 3, แบงค์ approval) | For quick gen without brand requirements |
 | **Bulk/automated** (scheduled, pipeline) | API (gpt-image-1/Gemini) | poster.js CDP | Tier 3 — requires แบงค์ API key approval |
 
 ---
@@ -71,7 +75,7 @@ node scripts/poster.js generate "ประกันชีวิต CI" --type pr
 
 ---
 
-## Pipeline 2: MQTT gemini-gen.sh (FALLBACK / general Gemini)
+## Pipeline 2: MQTT gemini-gen.sh (HISTORY: dropped 14 Oct 2026, T3030; do not use)
 
 **What**: Chrome Extension + MQTT broker controls Gemini browser tab.
 
@@ -129,7 +133,7 @@ Generation attempt
   ├─ Success → proceed to download
   ├─ Timeout (180s) → retry count++
   │   ├─ retry < 2 → page.reload() → retry same prompt
-  │   └─ retry >= 2 → FAIL → fallback to MQTT pipeline
+  │   └─ retry >= 2 → FAIL → report the blocker (no MQTT fallback since 14 Oct 2026, T3030)
   └─ Flat response count (no change 2 polls) → same as timeout
 ```
 
@@ -182,7 +186,7 @@ This SOP v3.0 **supersedes** the following. Do NOT follow them for poster genera
 | Any standalone "MQTT image gen SOP" | ❌ DELETED | This document is canonical |
 
 **What remains valid**:
-- Global CLAUDE.md Rule #4 (gemini-gen.sh for general Gemini use) — still valid for NON-poster use
+- ~~Global CLAUDE.md Rule #4 (gemini-gen.sh for general Gemini use) — still valid for NON-poster use~~ superseded 14 Oct 2026: GR#4 = `/poster` (DALL-E) only
 - Designer CLAUDE_poster_conduct.md (layout/typography/QA rules) — still valid for design standards
 - DocCon CLAUDE_openai_image_gen_conduct.md — still valid for OpenAI API when approved
 
@@ -192,6 +196,7 @@ This SOP v3.0 **supersedes** the following. Do NOT follow them for poster genera
 
 | Version | Date | Author | Change |
 |---------|------|--------|--------|
+| 3.1 | 2026-10-14 | Admin (bob T3030) | Gemini dropped (แบงค์): poster.js/`/poster` only; MQTT gemini-gen/chatgpt-gen marked history (extension stalls, background.js:165) |
 | 3.0 | 2026-07-05 | DocCon | Unified SOP: CDP primary, MQTT fallback, recovery specs |
 | 2.x | 2026-06 | Various | Multiple conflicting SOPs across repos |
 | 1.0 | 2026-05 | Designer | Original MQTT-only approach |

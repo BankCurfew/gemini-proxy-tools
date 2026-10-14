@@ -1,5 +1,10 @@
 # Gemini Proxy Tools
 
+> **⚠️ 14 Oct 2026 (แบงค์, T3030): Gemini is dropped. Do not use `gemini-gen.sh` or `chatgpt-gen.sh` for image generation.**
+> The only image path is skill `/poster` (`scripts/poster.js`, CDP → ChatGPT DALL-E), see `docs/SOP-IMAGE-GEN-V3.md`.
+> The MQTT extension currently stalls every command (`chrome.storage.local.set` hangs, claude-browser-proxy `background.js:165`).
+> Everything below about Gemini is kept as history.
+
 > MQTT-powered bridge between CLI agents and Google Gemini browser — control Gemini from terminal, automate image generation, extract responses, and more.
 
 **For**: Humans & AI Agents | **Stack**: Chrome Extension + MQTT (Mosquitto) + WebSocket | **Repo**: [claude-browser-proxy](https://github.com/BankCurfew/claude-browser-proxy)
@@ -328,7 +333,7 @@ for SCENE in "golden sunset bridge" "dark forest path" "mountain peak dawn"; do
 done
 ```
 
-### Example 3: Using gemini-gen.sh (Recommended)
+### Example 3: Using gemini-gen.sh (HISTORY: Gemini dropped 14 Oct 2026, use `/poster`)
 
 ```bash
 # Auto-pins tab, polls fast, optional download
