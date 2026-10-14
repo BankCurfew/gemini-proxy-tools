@@ -127,6 +127,15 @@
       "set_by": "designer T2709 (bob order: day images via ChatGPT; created with BoB ψ/lab/t2301/create-series.mjs)",
       "note": "ONE chat for the 13 Austria trip day images; no text in images"
     },
+    "iagencyaia-contest": {
+      "chat_id": "6acf007a-7d2c-83ec-935d-db1b292b2b1b",
+      "base_brand": "iagencyaia",
+      "title": "CONTEST · 2026-10 · theme art",
+      "project": "iAgencyAIA",
+      "created": "2026-10-14",
+      "set_by": "designer T3027 (bob 14/10: hero art via poster.js DALL-E; created with BoB ψ/lab/t2301/create-series.mjs)",
+      "note": "ONE chat for contest theme hero art (FA Tools HOF promo packs); art only, no text/logos in images, not posters, no poster gates"
+    },
     "wewealth-mascot": {
       "chat_id": "6ac6533b-3f84-83ec-ab94-7346537afce0",
       "created": "2026-10-07T14:12:15.644Z",
