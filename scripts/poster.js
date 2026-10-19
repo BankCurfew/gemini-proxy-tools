@@ -253,6 +253,8 @@ const REFUSAL_PATTERNS = [
 ];
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+// T3141: log a URL as origin+path only (an Access login URL carries a meta token + redirect query)
+function shortUrl(u) { try { const x = new URL(u); return x.origin === 'null' ? String(u).slice(0, 80) : x.origin + x.pathname; } catch { return String(u).slice(0, 80); } }
 
 // T2753: per-call bound on the chat tab (TAB BUSY windows, never re-issue a call) — scripts/tab-guard.js
 const { TabBusyError, guardTab: guardTabWith } = require('./tab-guard');
@@ -363,19 +365,21 @@ async function connect() {
   const { browser, page } = await slotWindow();
   // T599: ONLY the active brand chat. The slot tab is ours, so it is navigated to that chat, never to another one.
   if (!page.url().includes(activeChatId)) {
-    console.log(`[connect] slot ${SLOT} tab at ${page.url()} — opening the brand chat...`);
+    console.log(`[connect] slot ${SLOT} tab at ${shortUrl(page.url())} — opening the brand chat...`);
     await page.goto(`${cfg.chatgpt_url}/c/${activeChatId}`, { waitUntil: 'domcontentloaded', timeout: 30000 }); await sleep(3000); // T2427: domcontentloaded + 3s (networkidle2 hangs on SSE-heavy chats)
     await sleep(3000);
     // Verify navigation reached the target chat — ChatGPT may redirect to home or new chat
     if (!page.url().includes(activeChatId)) {
       throw new Error(
-        `🚫 CONNECT FAILED: Navigated to brand chat but landed at ${page.url()}\n` +
+        `🚫 CONNECT FAILED: Navigated to brand chat but landed at ${shortUrl(page.url())}\n` +
         `   Expected URL to contain: ${activeChatId.slice(0, 8)}...\n` +
         `   The chat may have been deleted or the session expired.\n` +
         `   Fix: check the ChatGPT login in the slot ${SLOT} window, or run: node poster.js new-chat --brand ${BRAND_FLAG}`
       );
     }
   }
+  // T3141: the session gate's "Tab:" line is whichever ChatGPT tab it probed for cookies, not this one
+  console.log(`[connect] send target: slot ${SLOT} brand chat ${activeChatId.slice(0, 8)}… (the session-check Tab line is only the cookie probe)`);
   return { browser, page: guardTab(page) };
 }
 
