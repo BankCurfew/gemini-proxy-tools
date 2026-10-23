@@ -159,6 +159,7 @@ echo "$(date '+%Y-%m-%d %H:%M:%S') | Designer-Oracle | $(hostname) | Notificatio
 ```
 
 poster.js emits heartbeat every tick during the 180s wait loop automatically (after T5).
+Every run that ends without an image (refused, timeout, last stall, failed send, T9 fail, Ctrl-C) closes its own stream at exit with `HB: <id> 100% done ended without image (exit N, last: <status>)` (T3264, gemini-proxy-tools#57), so no stream is left open for hb-checker. Pass the ticket id (`wait T####`) so the stream carries it.
 
 ---
 
