@@ -159,6 +159,15 @@
       "base_brand": "wealthbanks",
       "set_by": "designer T3014 (bob order 14/10: dedicated project chat for the 3-slide deck)",
       "note": "ONE chat for the T3014 entrepreneur tax deck slides; never posters/covers"
+    },
+    "iagencyaia-tabletop": {
+      "chat_id": "6adb9b74-9408-83ec-abfe-be2d703ed2fd",
+      "base_brand": "iagencyaia",
+      "title": "TABLETOP · 2026-10 · iJourney art",
+      "project": "iAgencyAIA",
+      "created": "2026-10-24",
+      "set_by": "designer T3263 (bob 24/10: new art via /poster in iJourney painterly style; created with BoB ψ/lab/t2301/create-series.mjs)",
+      "note": "ONE chat for tabletop-app art in iJourney's painterly storybook style (hero portraits, world key art); art only, no text/logos in images, no real faces, not posters, no poster gates"
     }
   },
   "archived": {
