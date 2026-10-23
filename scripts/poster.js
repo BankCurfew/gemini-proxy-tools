@@ -311,7 +311,15 @@ function heartbeat(taskId, pct, status) {
   const line = `${ts} | ${oracle} | ${hostname} | Notification | ${oracle} | heartbeat » HB: ${taskId} ${pct}% ${status}` + '\n';
   const feedPath = path.join(process.env.HOME || '/home/curfew', '.oracle/feed.log');
   try { fs.appendFileSync(feedPath, line); } catch {}
+  // T3264 (designer 24 Oct): remember which streams are still open, so the exit handler below can close them
+  if (pct >= 100 || /^done\b/.test(status)) _openHb.delete(taskId); else _openHb.set(taskId, status);
 }
+// T3264: a run that ends without an image (refused, timeout, last stall, failed send, T9 fail, SIGINT/SIGTERM via
+// process.exit) used to leave its stream at <100% and hb-checker flagged the oracle. Close every still-open id once.
+const _openHb = new Map();
+process.on('exit', (code) => {
+  for (const [id, last] of [..._openHb]) heartbeat(id, 100, `done ended without image (exit ${code}, last: ${last})`);
+});
 
 let _createdPages = [];
 // T3014: how long a send / attach waits for ChatGPT's late-mounting composer (POSTER_COMPOSER_WAIT_MS = tests)
@@ -1814,4 +1822,4 @@ if (require.main === module) main()
     if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(EXIT_TAB_BUSY); }
     console.error('ERROR:', e.message); process.exit(1);
   });   // T2790: requirable by test/t2790-stalled-send.test.js
-module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles };   // T3014: attachFiles for test/t3014-attach-wait
+module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles, heartbeat };   // T3014: attachFiles for test/t3014-attach-wait
