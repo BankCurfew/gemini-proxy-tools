@@ -313,16 +313,18 @@ function heartbeat(taskId, pct, status) {
   // run, the stream is theirs: poster's last line keeps their % and says the run ended, it never closes it.
   if (!_inherited.has(taskId)) _inherited.set(taskId, openStreamBefore(feedPath, oracle, taskId));
   const inh = _inherited.get(taskId);
+  let runEnded = false;
   if (inh && (pct >= 100 || /^done\b/.test(status))) {
+    runEnded = true;
     pct = inh.pct;
-    status = `poster run ended: ${/^done ended without image/.test(status) ? status.replace(/^done ended without image/, 'no image') : 'image ' + status}`;
+    status = `${inh.state ? inh.state + ' ' : ''}poster run ended: ${/^done ended without image/.test(status) ? status.replace(/^done ended without image/, 'no image') : 'image ' + status}`;
   }
   const line = `${ts} | ${oracle} | ${hostname} | Notification | ${oracle} | heartbeat » HB: ${taskId} ${pct}% ${status}` + '\n';
   try { fs.appendFileSync(feedPath, line); } catch {}
   // T3264 (designer 24 Oct): remember which streams are still open, so the exit handler below can close them
-  if (pct >= 100 || /^done\b/.test(status) || /^poster run ended/.test(status)) _openHb.delete(taskId); else _openHb.set(taskId, status);
+  if (runEnded || pct >= 100 || /^done\b/.test(status)) _openHb.delete(taskId); else _openHb.set(taskId, status);
 }
-// T3282: this oracle's last HB on taskId in the feed tail, if it was still open (<100%, not done) → { pct }, else null
+// T3282: this oracle's last HB on taskId in the feed tail, if it was still open (<100%, not done) → { pct, state }, else null
 function openStreamBefore(feedPath, oracle, taskId) {
   try {
     const fd = fs.openSync(feedPath, 'r');
@@ -335,7 +337,9 @@ function openStreamBefore(feedPath, oracle, taskId) {
       if (!l.includes(tag) || l.split(' | ')[1] !== oracle) continue;
       const m = l.slice(l.indexOf(tag) + tag.length).match(/^(\d+)% ?(.*)$/);
       if (!m) return null;
-      return Number(m[1]) < 100 && !/^done\b/.test(m[2]) ? { pct: Number(m[1]) } : null;
+      // designer (T3282): keep their GR#9 state word too (working | waiting[:Txxx] | blocked[:Txxx]), not only the %
+      const state = (m[2].match(/^(working|waiting|blocked)(:\S+)?(?=\s|$)/) || [''])[0];
+      return Number(m[1]) < 100 && !/^done\b/.test(m[2]) ? { pct: Number(m[1]), state } : null;
     }
   } catch {}
   return null;
@@ -343,7 +347,7 @@ function openStreamBefore(feedPath, oracle, taskId) {
 // T3264: a run that ends without an image (refused, timeout, last stall, failed send, T9 fail, SIGINT/SIGTERM via
 // process.exit) used to leave its stream at <100% and hb-checker flagged the oracle. Close every still-open id once.
 const _openHb = new Map();
-const _inherited = new Map();   // T3282: taskId → { pct } when the oracle had it open before this run, else null
+const _inherited = new Map();   // T3282: taskId → { pct, state } when the oracle had it open before this run, else null
 process.on('exit', (code) => {
   for (const [id, last] of [..._openHb]) heartbeat(id, 100, `done ended without image (exit ${code}, last: ${last})`);
 });

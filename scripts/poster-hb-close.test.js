@@ -71,3 +71,13 @@ test('T3282: another oracle\'s open stream on the same id does not count', () =>
   const lines = runWithFeed(other, `p.heartbeat('T9104', 95, 'image-detected'); p.heartbeat('T9104', 100, 'done');`);
   assert.strictEqual(lines.at(-1), 'T9104 100% done');
 });
+
+test('T3282 (designer): the oracle\'s state word (waiting:Txxx) comes back with its % on the final line', () => {
+  const lines = runWithFeed(own('T9105', 60, 'waiting:T9001 gen batch 3'), `p.heartbeat('T9105', 95, 'image-detected'); p.heartbeat('T9105', 100, 'done');`);
+  assert.strictEqual(lines.at(-1), 'T9105 60% waiting:T9001 poster run ended: image done');
+});
+
+test('T3282 (designer): last line 100%/done = not open → poster closes its own run there', () => {
+  const lines = runWithFeed(own('T9106', 100, 'done set 1'), `p.heartbeat('T9106', 95, 'image-detected'); p.heartbeat('T9106', 100, 'done');`);
+  assert.strictEqual(lines.at(-1), 'T9106 100% done');
+});
