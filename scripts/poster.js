@@ -308,15 +308,42 @@ function heartbeat(taskId, pct, status) {
   }
   const oracle = cfg.heartbeat_oracle;
   const hostname = require('os').hostname();
-  const line = `${ts} | ${oracle} | ${hostname} | Notification | ${oracle} | heartbeat » HB: ${taskId} ${pct}% ${status}` + '\n';
   const feedPath = path.join(process.env.HOME || '/home/curfew', '.oracle/feed.log');
+  // T3282 (QA N3): the id is usually the CALLING oracle's own ticket. If that oracle already had it open before this
+  // run, the stream is theirs: poster's last line keeps their % and says the run ended, it never closes it.
+  if (!_inherited.has(taskId)) _inherited.set(taskId, openStreamBefore(feedPath, oracle, taskId));
+  const inh = _inherited.get(taskId);
+  if (inh && (pct >= 100 || /^done\b/.test(status))) {
+    pct = inh.pct;
+    status = `poster run ended: ${/^done ended without image/.test(status) ? status.replace(/^done ended without image/, 'no image') : 'image ' + status}`;
+  }
+  const line = `${ts} | ${oracle} | ${hostname} | Notification | ${oracle} | heartbeat » HB: ${taskId} ${pct}% ${status}` + '\n';
   try { fs.appendFileSync(feedPath, line); } catch {}
   // T3264 (designer 24 Oct): remember which streams are still open, so the exit handler below can close them
-  if (pct >= 100 || /^done\b/.test(status)) _openHb.delete(taskId); else _openHb.set(taskId, status);
+  if (pct >= 100 || /^done\b/.test(status) || /^poster run ended/.test(status)) _openHb.delete(taskId); else _openHb.set(taskId, status);
+}
+// T3282: this oracle's last HB on taskId in the feed tail, if it was still open (<100%, not done) → { pct }, else null
+function openStreamBefore(feedPath, oracle, taskId) {
+  try {
+    const fd = fs.openSync(feedPath, 'r');
+    const size = fs.fstatSync(fd).size, len = Math.min(size, 2 * 1024 * 1024), buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len); fs.closeSync(fd);
+    const tag = `HB: ${taskId} `;
+    const lines = buf.toString('utf8').split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const l = lines[i];
+      if (!l.includes(tag) || l.split(' | ')[1] !== oracle) continue;
+      const m = l.slice(l.indexOf(tag) + tag.length).match(/^(\d+)% ?(.*)$/);
+      if (!m) return null;
+      return Number(m[1]) < 100 && !/^done\b/.test(m[2]) ? { pct: Number(m[1]) } : null;
+    }
+  } catch {}
+  return null;
 }
 // T3264: a run that ends without an image (refused, timeout, last stall, failed send, T9 fail, SIGINT/SIGTERM via
 // process.exit) used to leave its stream at <100% and hb-checker flagged the oracle. Close every still-open id once.
 const _openHb = new Map();
+const _inherited = new Map();   // T3282: taskId → { pct } when the oracle had it open before this run, else null
 process.on('exit', (code) => {
   for (const [id, last] of [..._openHb]) heartbeat(id, 100, `done ended without image (exit ${code}, last: ${last})`);
 });

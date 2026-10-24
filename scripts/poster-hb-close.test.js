@@ -35,3 +35,39 @@ test('two ids: only the open one is closed', () => {
   const { lines } = run(`p.heartbeat('T9004', 100, 'done'); p.heartbeat('T9005', 50, 'T9-mismatch-retry');`);
   assert.strictEqual(lines.filter((l) => / 100% done ended/.test(l)).join(), 'T9005 100% done ended without image (exit 0, last: T9-mismatch-retry)');
 });
+
+// T3282 (QA N3 on T3264): poster writes under the CALLING oracle's ticket id. When that oracle already had the id open
+// (its own work stream), poster's last line must not close it: it ends with the oracle's last % and "poster run ended".
+function runWithFeed(seed, body) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 't3282-'));
+  fs.mkdirSync(path.join(home, '.oracle'));
+  fs.writeFileSync(path.join(home, '.oracle/feed.log'), seed);
+  const r = spawnSync(process.execPath, ['-e', `const p = require(${JSON.stringify(path.join(__dirname, 'poster.js'))}); ${body}`],
+    { env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: 20000 });
+  const feed = fs.readFileSync(path.join(home, '.oracle/feed.log'), 'utf8');
+  return feed.split('\n').filter(Boolean).filter((l) => l.includes('HB: ')).map((l) => l.split('HB: ')[1]);
+}
+const own = (id, pct, s) => `2026-10-25 01:00:00 | Designer-Oracle | h | Notification | Designer-Oracle | heartbeat » HB: ${id} ${pct}% ${s}\n`;
+
+test('T3282: oracle had the id open → a run with no image ends without closing it', () => {
+  const lines = runWithFeed(own('T9100', 15, 'café art gen'), `p.heartbeat('T9100', 5, 'generation-started'); p.heartbeat('T9100', 0, 'timeout'); process.exitCode = 1;`);
+  assert.strictEqual(lines.filter((l) => /^T9100 100%/.test(l)).length, 0);
+  assert.match(lines.at(-1), /^T9100 15% poster run ended: no image \(exit 1, last: timeout\)$/);
+});
+
+test('T3282: oracle had the id open → a successful run ends without closing it', () => {
+  const lines = runWithFeed(own('T9101', 40, 'poster set 2/4'), `p.heartbeat('T9101', 95, 'image-detected'); p.heartbeat('T9101', 100, 'done');`);
+  assert.strictEqual(lines.filter((l) => /^T9101 100%/.test(l)).length, 0);
+  assert.strictEqual(lines.at(-1), 'T9101 40% poster run ended: image done');
+});
+
+test('T3282: the id was closed (100%) or never open → poster closes its own stream as before', () => {
+  const lines = runWithFeed(own('T9102', 100, 'done earlier') + own('T9103', 30, 'other id'), `p.heartbeat('T9102', 5, 'generation-started'); p.heartbeat('T9102', 0, 'refused'); process.exit(2);`);
+  assert.strictEqual(lines.at(-1), 'T9102 100% done ended without image (exit 2, last: refused)');
+});
+
+test('T3282: another oracle\'s open stream on the same id does not count', () => {
+  const other = `2026-10-25 01:00:00 | QA-Oracle | h | Notification | QA-Oracle | heartbeat » HB: T9104 20% qa check\n`;
+  const lines = runWithFeed(other, `p.heartbeat('T9104', 95, 'image-detected'); p.heartbeat('T9104', 100, 'done');`);
+  assert.strictEqual(lines.at(-1), 'T9104 100% done');
+});
