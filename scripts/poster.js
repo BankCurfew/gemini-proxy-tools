@@ -589,6 +589,9 @@ async function clickSend(page) {
         if (b.querySelector('svg') || b.querySelector('path')) { b.click(); return 'svg-fallback'; }
       }
     }
+    // T3507: a Stop button where Send should be = the page thinks a reply is still generating (30 Oct L4: stale since the
+    // 09:06 reply, server said finished). A synthetic Enter is ignored there, so 3 runs "sent" nothing; refuse instead.
+    if (scope.querySelector('button[aria-label="Stop"], button[aria-label*="Stop generating"], button[data-testid="stop-button"]')) return null;
     if (composer) { composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true })); return 'enter-key'; }
     return null;
   });
@@ -857,6 +860,8 @@ async function sendOnce(page, text, { label = 'send', timeoutMs = 20000, waitEna
   const sentAt = Date.now();
   const via = await clickSend(page);
   console.log(`[${label}] composer=${fill.kind} send via ${via || 'NOTHING — no send control found'}`);
+  if (!via && await page.evaluate(() => !!document.querySelector('form button[aria-label="Stop"], button[data-testid="stop-button"]')).catch(() => false))
+    console.error(`[${label}] a Stop button shows where Send should be: the page thinks a reply is still generating — not sending (T3507)`);
   if (!via) return 'no-send-control';
   // T3507: a new newest-user id with this text (DOM) or this text on the server = landed. A rising turn count or a
   // changed URL is only a hint to ask the server; it confirms on its own only when the server cannot be read.
