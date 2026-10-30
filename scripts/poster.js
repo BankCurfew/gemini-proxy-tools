@@ -589,6 +589,9 @@ async function clickSend(page) {
         if (b.querySelector('svg') || b.querySelector('path')) { b.click(); return 'svg-fallback'; }
       }
     }
+    // T3507: a Stop button where Send should be = the page thinks a reply is still generating (30 Oct L4: stale since the
+    // 09:06 reply, server said finished). A synthetic Enter is ignored there, so 3 runs "sent" nothing; refuse instead.
+    if (scope.querySelector('button[aria-label="Stop"], button[aria-label*="Stop generating"], button[data-testid="stop-button"]')) return null;
     if (composer) { composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true })); return 'enter-key'; }
     return null;
   });
@@ -653,6 +656,47 @@ const sameText = (shown, want) => {
 };
 const lastUser = (page) => page.evaluate(() => ({ id: window.__posterLastUserId(), text: window.__posterLastUser() }))
   .catch(() => ({ id: '', text: '' }));
+
+// T3507 (designer gen-45/45b, 30 Oct): DOM signals lie right after a reload. The turn count starts at 0 before the chat
+// renders (0 → 5 = the 5 turns already there) and the URL can change with no conversation on the server; both read as
+// 'confirmed' and the prompt landed nowhere. Ground truth = ChatGPT's own copy of the chat: read-only GETs from inside
+// the tab (same origin, the page's own session). Landed = a user message with this text, created at/after sinceMs.
+// { checked: false } = the server could not be read (no token, HTTP error, wrong origin): callers fall back to the DOM hints.
+// security T3507 SHOULD 1+2: the text compare runs INSIDE the page (no message text of any chat comes back to Node) and
+// only on the ChatGPT origin (POSTER_CHATGPT_ORIGIN overrides it for the local fake in test/t3507-server-confirm).
+const CHATGPT_ORIGIN = process.env.POSTER_CHATGPT_ORIGIN || 'https://chatgpt.com';
+async function serverLanded(page, text, sinceMs) {
+  const r = await page.evaluate(async (sinceSec, want, origin) => {
+    try {
+      if (location.origin !== origin) return { checked: false, why: 'not the ChatGPT origin' };
+      const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+      const w = norm(want);
+      const same = (x) => { const a = norm(x); return !!a && (a === w || (w.startsWith(a) && a.length >= w.length * 0.9)); };
+      const s = await (await fetch('/api/auth/session')).json();
+      if (!s || !s.accessToken) return { checked: false, why: 'no session token' };
+      const H = { Authorization: `Bearer ${s.accessToken}` };
+      const m = location.pathname.match(/\/c\/([0-9a-f-]{36})/);
+      let ids = m ? [m[1]] : [];
+      if (!ids.length) {   // brand-new chat whose URL has not switched yet: the chats touched since the send
+        const l = await fetch('/backend-api/conversations?offset=0&limit=3&order=updated', { headers: H });
+        if (!l.ok) return { checked: false, why: `conversations ${l.status}` };
+        ids = ((await l.json()).items || []).filter((c) => Date.parse(c.update_time) / 1000 >= sinceSec).map((c) => c.id);
+      }
+      let landed = false;
+      for (const id of ids) {
+        const d = await fetch(`/backend-api/conversation/${id}`, { headers: H });
+        if (!d.ok) return { checked: false, why: `conversation ${d.status}` };
+        for (const n of Object.values((await d.json()).mapping || {})) {
+          const msg = n && n.message;
+          if (msg && msg.author && msg.author.role === 'user' && (msg.create_time || 0) >= sinceSec
+            && same(((msg.content && msg.content.parts) || []).filter((x) => typeof x === 'string').join(' '))) landed = true;
+        }
+      }
+      return { checked: true, landed };
+    } catch (e) { return { checked: false, why: String(e).slice(0, 80) }; }
+  }, Math.floor(sinceMs / 1000) - 5, text, CHATGPT_ORIGIN).catch((e) => ({ checked: false, why: String(e).slice(0, 80) }));
+  return { checked: !!r.checked, landed: !!r.checked && !!r.landed, why: r.why || '' };
+}
 
 // Type into the visible composer and READ IT BACK. Returns { ok, kind, reason }. A mismatch is a failure, never a send.
 async function fillComposer(page, text) {
@@ -760,6 +804,7 @@ async function sendAndConfirm(page, text, opts = {}) {
   // image chat). Wait until it is there and idle BEFORE the first attempt, not only after a reload; a ready page passes at once.
   if (!(await waitChatReady(page, COMPOSER_WAIT_MS))) console.error(`[${label}] composer not ready after ${Math.round(COMPOSER_WAIT_MS / 1000)} s — trying anyway`);
   const before = await lastUser(page); // newest user message BEFORE any attempt: the reload check must see a NEW one
+  const sentAt = Date.now();          // T3507: the server check after a reload looks for this text created since here
   const first = await sendOnce(page, text, opts);
   if (first === 'confirmed') return true;
   if (first === 'no-composer-text') return false; // read-back refused: nothing was sent, retrying would not help
@@ -781,6 +826,8 @@ async function sendAndConfirm(page, text, opts = {}) {
     console.log(`[${label}] confirmed after reload: newest user message ${now.id.slice(0, 8)} is new since the send and is this text (no resend)`);
     return true;
   }
+  const srv = await serverLanded(page, text, sentAt);   // T3507: the DOM may not have rendered yet; never resend what the server has
+  if (srv.landed) { console.log(`[${label}] confirmed after reload: the server has this message (no resend)`); return true; }
   console.error(`[${label}] after reload: not proven landed (newest id ${now.id ? (now.id === before.id ? 'unchanged' : 'new but other text') : 'unreadable'}) -> resend`);
   const second = await sendOnce(page, text, opts);
   if (second === 'confirmed') return true;
@@ -810,19 +857,34 @@ async function sendOnce(page, text, { label = 'send', timeoutMs = 20000, waitEna
   // gpt#20: with an image attached, Send stays disabled until the upload finishes.
   const enabled = await waitSendEnabled(page, waitEnabledMs);
   if (enabled === 'timeout') { console.error(`[${label}] send button stayed disabled ${waitEnabledMs / 1000}s`); return 'send-disabled'; }
+  const sentAt = Date.now();
   const via = await clickSend(page);
   console.log(`[${label}] composer=${fill.kind} send via ${via || 'NOTHING — no send control found'}`);
+  if (!via && await page.evaluate(() => !!document.querySelector('form button[aria-label="Stop"], button[data-testid="stop-button"]')).catch(() => false))
+    console.error(`[${label}] a Stop button shows where Send should be: the page thinks a reply is still generating — not sending (T3507)`);
   if (!via) return 'no-send-control';
+  // T3507: a new newest-user id with this text (DOM) or this text on the server = landed. A rising turn count or a
+  // changed URL is only a hint to ask the server; it confirms on its own only when the server cannot be read.
   const deadline = Date.now() + timeoutMs;
+  let nextServer = Date.now() + 3000, warned = false;
   while (Date.now() < deadline) {
     await sleep(500);
     await installComposerFinder(page).catch(() => {});
     const now = await page.evaluate(() => window.__posterTurns()).catch(() => before);
     const last = await lastUser(page);
     const byText = !!last.id && last.id !== lastBefore.id && sameText(last.text, text);
-    if (now > before || page.url() !== urlBefore || byText) {
-      console.log(`[${label}] confirmed: ${now > before ? `new turn (${before} → ${now})` : byText ? 'newest user turn is this message' : 'chat url changed'}`);
-      return 'confirmed';
+    if (byText) { console.log(`[${label}] confirmed: newest user turn is this message`); return 'confirmed'; }
+    const hint = now > before ? `new turn (${before} → ${now})` : page.url() !== urlBefore ? 'chat url changed' : '';
+    if (hint || Date.now() >= nextServer) {
+      nextServer = Date.now() + 3000;
+      const srv = await serverLanded(page, text, sentAt);
+      if (srv.landed) { console.log(`[${label}] confirmed: the server has this message${hint ? ` (${hint})` : ''}`); return 'confirmed'; }
+      if (!srv.checked && hint) {
+        console.error(`[${label}] server check unavailable (${srv.why}) — falling back to the DOM hint`);
+        console.log(`[${label}] confirmed: ${hint} (DOM only)`);
+        return 'confirmed';
+      }
+      if (srv.checked && hint && !warned) { warned = true; console.error(`[${label}] ${hint} but the server has no such message yet — not confirmed`); }
     }
   }
   console.error(`[${label}] no new turn within ${timeoutMs / 1000}s after send (turns stayed ${before})`);
@@ -1853,4 +1915,4 @@ if (require.main === module) main()
     if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(EXIT_TAB_BUSY); }
     console.error('ERROR:', e.message); process.exit(1);
   });   // T2790: requirable by test/t2790-stalled-send.test.js
-module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles, heartbeat };   // T3014: attachFiles for test/t3014-attach-wait
+module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles, heartbeat, serverLanded };   // T3014: attachFiles for test/t3014-attach-wait
