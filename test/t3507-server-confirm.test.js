@@ -11,6 +11,7 @@
 'use strict';
 const http = require('http'); const path = require('path'); const fs = require('fs');
 const puppeteer = require('puppeteer-core');
+const PORT = 37507; process.env.POSTER_CHATGPT_ORIGIN = `http://127.0.0.1:${PORT}`;   // fake origin (security SHOULD 2 guard)
 const POSTER = process.env.POSTER ? path.resolve(process.env.POSTER) : path.join(__dirname, '../scripts/poster.js');
 const { sendAndConfirm } = require(POSTER);
 const CHROME = process.env.CHROME || (() => {
@@ -47,7 +48,7 @@ const srv = http.createServer((req, res) => {
 });
 
 (async () => {
-  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  await new Promise((r) => srv.listen(PORT, '127.0.0.1', r));
   const url = `http://127.0.0.1:${srv.address().port}/c/${CID}`;
   const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ['--no-sandbox'] });
   const run = async (name, m, text) => {

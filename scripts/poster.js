@@ -658,10 +658,17 @@ const lastUser = (page) => page.evaluate(() => ({ id: window.__posterLastUserId(
 // renders (0 → 5 = the 5 turns already there) and the URL can change with no conversation on the server; both read as
 // 'confirmed' and the prompt landed nowhere. Ground truth = ChatGPT's own copy of the chat: read-only GETs from inside
 // the tab (same origin, the page's own session). Landed = a user message with this text, created at/after sinceMs.
-// { checked: false } = the server could not be read (no token, HTTP error): callers fall back to the old DOM hints.
+// { checked: false } = the server could not be read (no token, HTTP error, wrong origin): callers fall back to the DOM hints.
+// security T3507 SHOULD 1+2: the text compare runs INSIDE the page (no message text of any chat comes back to Node) and
+// only on the ChatGPT origin (POSTER_CHATGPT_ORIGIN overrides it for the local fake in test/t3507-server-confirm).
+const CHATGPT_ORIGIN = process.env.POSTER_CHATGPT_ORIGIN || 'https://chatgpt.com';
 async function serverLanded(page, text, sinceMs) {
-  const r = await page.evaluate(async (sinceSec) => {
+  const r = await page.evaluate(async (sinceSec, want, origin) => {
     try {
+      if (location.origin !== origin) return { checked: false, why: 'not the ChatGPT origin' };
+      const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+      const w = norm(want);
+      const same = (x) => { const a = norm(x); return !!a && (a === w || (w.startsWith(a) && a.length >= w.length * 0.9)); };
       const s = await (await fetch('/api/auth/session')).json();
       if (!s || !s.accessToken) return { checked: false, why: 'no session token' };
       const H = { Authorization: `Bearer ${s.accessToken}` };
@@ -672,20 +679,20 @@ async function serverLanded(page, text, sinceMs) {
         if (!l.ok) return { checked: false, why: `conversations ${l.status}` };
         ids = ((await l.json()).items || []).filter((c) => Date.parse(c.update_time) / 1000 >= sinceSec).map((c) => c.id);
       }
-      const texts = [];
+      let landed = false;
       for (const id of ids) {
         const d = await fetch(`/backend-api/conversation/${id}`, { headers: H });
         if (!d.ok) return { checked: false, why: `conversation ${d.status}` };
         for (const n of Object.values((await d.json()).mapping || {})) {
           const msg = n && n.message;
-          if (msg && msg.author && msg.author.role === 'user' && (msg.create_time || 0) >= sinceSec)
-            texts.push(((msg.content && msg.content.parts) || []).filter((x) => typeof x === 'string').join(' '));
+          if (msg && msg.author && msg.author.role === 'user' && (msg.create_time || 0) >= sinceSec
+            && same(((msg.content && msg.content.parts) || []).filter((x) => typeof x === 'string').join(' '))) landed = true;
         }
       }
-      return { checked: true, texts };
+      return { checked: true, landed };
     } catch (e) { return { checked: false, why: String(e).slice(0, 80) }; }
-  }, Math.floor(sinceMs / 1000) - 5).catch((e) => ({ checked: false, why: String(e).slice(0, 80) }));
-  return { checked: !!r.checked, landed: !!r.checked && (r.texts || []).some((x) => sameText(x, text)), why: r.why || '' };
+  }, Math.floor(sinceMs / 1000) - 5, text, CHATGPT_ORIGIN).catch((e) => ({ checked: false, why: String(e).slice(0, 80) }));
+  return { checked: !!r.checked, landed: !!r.checked && !!r.landed, why: r.why || '' };
 }
 
 // Type into the visible composer and READ IT BACK. Returns { ok, kind, reason }. A mismatch is a failure, never a send.
