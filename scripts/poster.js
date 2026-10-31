@@ -796,12 +796,60 @@ async function waitRenderIdle(label) {
 }
 
 // Fill → read back → send → prove a NEW user turn appeared (or the chat URL changed, for a brand-new chat).
+// T3507 (31 Oct 09:28-09:30 L4, designer gen-916b/c; same as 30 Oct): a Stop button stayed where Send should be for 20+
+// minutes after the last reply had finished, and it survived page.reload, so every send was refused (no-send-control).
+// The server is ground truth: if the chat's current node is a FINISHED assistant turn (end_turn, nothing in_progress)
+// at least STALE_STOP_MIN_S old, the Stop is stale → click it once (what clearing the tab by hand did, 30 + 31 Oct).
+// Server busy or unreadable → leave the Stop alone (a real generation is never cancelled). In-page, like serverLanded:
+// only {checked, idle, ageSec} comes back to Node, no message text.
+const STALE_STOP_MIN_S = 15;
+const STOP_SEL = 'form button[aria-label="Stop"], button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label="Stop generating"]';
+async function serverIdle(page) {
+  const r = await page.evaluate(async (origin) => {
+    try {
+      if (location.origin !== origin) return { checked: false, why: 'not the ChatGPT origin' };
+      const m = location.pathname.match(/\/c\/([0-9a-f-]{36})/);
+      if (!m) return { checked: false, why: 'no conversation in the URL' };
+      const s = await (await fetch('/api/auth/session')).json();
+      if (!s || !s.accessToken) return { checked: false, why: 'no session token' };
+      const d = await fetch(`/backend-api/conversation/${m[1]}`, { headers: { Authorization: `Bearer ${s.accessToken}` } });
+      if (!d.ok) return { checked: false, why: `conversation ${d.status}` };
+      const j = await d.json();
+      const nodes = Object.values(j.mapping || {}).map((n) => n && n.message).filter(Boolean);
+      if (nodes.some((x) => x.status === 'in_progress')) return { checked: true, idle: false, why: 'a message is in_progress' };
+      const cur = j.current_node && j.mapping && j.mapping[j.current_node] && j.mapping[j.current_node].message;
+      if (!cur) return { checked: false, why: 'no current node' };
+      const ageSec = Math.round(Date.now() / 1000 - (cur.update_time || cur.create_time || 0));
+      const idle = cur.author && cur.author.role === 'assistant' && cur.status === 'finished_successfully' && cur.end_turn === true;
+      return { checked: true, idle: !!idle, ageSec, why: idle ? '' : `current node ${cur.author && cur.author.role}/${cur.status}/end_turn=${cur.end_turn}` };
+    } catch (e) { return { checked: false, why: String(e).slice(0, 80) }; }
+  }, CHATGPT_ORIGIN).catch((e) => ({ checked: false, why: String(e).slice(0, 80) }));
+  return { checked: !!r.checked, idle: !!r.checked && !!r.idle, ageSec: r.ageSec, why: r.why || '' };
+}
+async function clearStaleStop(page, label) {
+  if (!(await page.$(STOP_SEL).catch(() => null))) return false;
+  const srv = await serverIdle(page);
+  if (!srv.idle || !(srv.ageSec >= STALE_STOP_MIN_S)) {
+    console.error(`[${label}] Stop shows and the server is not proven idle (${srv.checked ? srv.why || `last turn ${srv.ageSec}s old` : 'unreadable: ' + srv.why}) — leaving it`);
+    return false;
+  }
+  const btn = await page.$(STOP_SEL).catch(() => null);
+  if (!btn) return false;
+  await btn.click().catch(() => {});
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline && (await page.$(STOP_SEL).catch(() => null))) await sleep(250);
+  const gone = !(await page.$(STOP_SEL).catch(() => null));
+  console.error(`[${label}] stale Stop (server idle, last turn finished ${srv.ageSec}s ago) → clicked Stop once: ${gone ? 'cleared' : 'STILL SHOWS'} (T3507)`);
+  return gone;
+}
+
 async function sendAndConfirm(page, text, opts = {}) {
   const label = opts.label || 'send';
   await waitRenderIdle(label);
   await installComposerFinder(page);
   // T3014 (designer 14 Oct, new-chat 2/2 "no visible composer"): ChatGPT mounts the composer late (fresh home page, long
   // image chat). Wait until it is there and idle BEFORE the first attempt, not only after a reload; a ready page passes at once.
+  await clearStaleStop(page, label);   // T3507 31 Oct: before the composer wait, which would sit 45 s on a stale Stop
   if (!(await waitChatReady(page, COMPOSER_WAIT_MS))) console.error(`[${label}] composer not ready after ${Math.round(COMPOSER_WAIT_MS / 1000)} s — trying anyway`);
   const before = await lastUser(page); // newest user message BEFORE any attempt: the reload check must see a NEW one
   const sentAt = Date.now();          // T3507: the server check after a reload looks for this text created since here
@@ -819,6 +867,8 @@ async function sendAndConfirm(page, text, opts = {}) {
   // until the chat is ready, and only resend if our message is NOT already the newest user turn (never double-send).
   console.error(`[${label}] retrying once after reload (${first})`);
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  await installComposerFinder(page).catch(() => {});
+  await clearStaleStop(page, label);   // T3507 31 Oct: the stale Stop survived the reload
   await waitChatReady(page, COMPOSER_WAIT_MS);   // T3014 Editor: the same knob as the first-attempt wait
   await installComposerFinder(page);
   const now = await lastUser(page);
