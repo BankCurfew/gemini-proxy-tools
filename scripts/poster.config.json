@@ -178,6 +178,14 @@
       "note": "ONE chat for new iJourney scene art in the redesign (T3582), same painterly storybook world as iagencyaia-tabletop; art only, no text/logos in images, no real faces, not posters, no poster gates; mobile budget <= 200 KB at 828 px after export (T3581)",
       "chat_id": "6ae83e89-1be8-83ec-92cb-928c6f7b2a58",
       "chat_created": "2026-11-02T07:41:04.183Z"
+    },
+    "dreambank-carousel": {
+      "base_brand": "dreambank",
+      "title": "DREAMBANK · 2026-11 · carousel backgrounds",
+      "project": "DreamBank",
+      "created": "2026-11-02",
+      "set_by": "dev T3585 (designer ask 14:5x); chat_id written by designer's new-chat",
+      "note": "ONE chat for per-slide cinematic carousel backgrounds for DreamBank social (IG/FB/TikTok/YT); no people, no text/logos in images, no real faces; base dreambank = own forbid list in poster.js (no iAgency / AIA red / WealthBanks tokens)"
     }
   },
   "archived": {

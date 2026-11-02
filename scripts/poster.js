@@ -98,6 +98,8 @@ const BRAND_FORBID = {
   wealthbanks: ['iagencyaia', 'iagency', 'i-agency', '@iagencyaia', 'd31145', 'c8102e', 'discord', '@iagency'],
   // T2775 (แบงค์ order via bob, designer's list): น้อง We / WeWealth Advisory — no iAgency, no AIA red, no WealthBanks, no วิง
   wewealth: ['iagency', '@iagencyaia', 'd31145', 'c8102e', 'wealthbanks', 'น้องวิง', 'วิงแซ่บ'],
+  // T3585 (designer ask, dev default 2 Nov): DreamBank = แบงค์'s own social brand — no iAgency, no AIA red, no WealthBanks
+  dreambank: ['iagency', 'i-agency', '@iagencyaia', 'd31145', 'c8102e', 'wealthbanks', 'wealthbanks.net', 'wealth-bank', 'prestige white'],
 };
 // Canonical brand name each slug must self-declare in a composed prompt.
 const BRAND_SELF_NAME = {
