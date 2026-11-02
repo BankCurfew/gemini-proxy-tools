@@ -185,7 +185,9 @@
       "project": "DreamBank",
       "created": "2026-11-02",
       "set_by": "dev T3585 (designer ask 14:5x); chat_id written by designer's new-chat",
-      "note": "ONE chat for per-slide cinematic carousel backgrounds for DreamBank social (IG/FB/TikTok/YT); no people, no text/logos in images, no real faces; base dreambank = own forbid list in poster.js (no iAgency / AIA red / WealthBanks tokens)"
+      "note": "ONE chat for per-slide cinematic carousel backgrounds for DreamBank social (IG/FB/TikTok/YT); no people, no text/logos in images, no real faces; base dreambank = own forbid list in poster.js (no iAgency / AIA red / WealthBanks tokens)",
+      "chat_id": "6ae843cc-d2fc-83ec-a12e-f80fe02fa21f",
+      "chat_created": "2026-11-02T08:03:30.863Z"
     }
   },
   "archived": {
