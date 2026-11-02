@@ -168,6 +168,14 @@
       "created": "2026-10-24",
       "set_by": "designer T3263 (bob 24/10: new art via /poster in iJourney painterly style; created with BoB ψ/lab/t2301/create-series.mjs)",
       "note": "ONE chat for tabletop-app art in iJourney's painterly storybook style (hero portraits, world key art); art only, no text/logos in images, no real faces, not posters, no poster gates"
+    },
+    "iagencyaia-ijourney": {
+      "base_brand": "iagencyaia",
+      "title": "IJOURNEY · 2026-11 · scene art",
+      "project": "iAgencyAIA",
+      "created": "2026-11-02",
+      "set_by": "dev T3582 (designer ask 14:3x, แบงค์ CHANGES 14:31: new iJourney scene art); chat_id written by designer's new-chat",
+      "note": "ONE chat for new iJourney scene art in the redesign (T3582), same painterly storybook world as iagencyaia-tabletop; art only, no text/logos in images, no real faces, not posters, no poster gates; mobile budget <= 200 KB at 828 px after export (T3581)"
     }
   },
   "archived": {
