@@ -1771,6 +1771,19 @@ function stripFlags(argv) {
   return out;
 }
 
+/**
+ * T3680 (designer 4 Nov): the session gate's verdict. 'no-tab' = Admin-Oracle chatgpt-session-ensure.sh found no ChatGPT
+ * tab at all (it fails "no ChatGPT tab open in CDP"): the shared slot L4 had been moved (aia's agent portal), not a dead
+ * session, and poster's own connect() opens the brand chat in its slot. Every other failure keeps stopping the run.
+ */
+function sessionGateVerdict(code, output) {
+  if (code === 0) return 'ok';
+  if (code === 3) return 'busy';
+  if (/no ChatGPT tab open in CDP/.test(output || '')) return 'no-tab';
+  if (code === 2) return 'cdp';
+  return 'dead';
+}
+
 async function main() {
   const [,, cmd, ...args] = stripFlags(process.argv);
 
@@ -1842,10 +1855,17 @@ Examples:
   const ensureScript = path.join(process.env.HOME || '/home/curfew',
     'repos/github.com/BankCurfew/Admin-Oracle/scripts/chatgpt-session-ensure.sh');
   if (fs.existsSync(ensureScript)) {
-    try {
-      execSync(`bash "${ensureScript}"`, { stdio: 'inherit', timeout: 30000 });
-    } catch (e) {
-      const code = e.status || 1;
+    // T3680: capture the gate's output (echoed as before) so its one non-session verdict can be told apart
+    const g = require('child_process').spawnSync('bash', [ensureScript], { encoding: 'utf8', timeout: 30000 });
+    const gOut = `${g.stdout || ''}${g.stderr || ''}`;
+    if (gOut) process.stdout.write(gOut);
+    const verdict = sessionGateVerdict(g.status === null ? 1 : g.status, gOut);
+    if (verdict === 'no-tab') {
+      // no ChatGPT tab anywhere (e.g. aia's run left the shared slot on the agent portal): not a dead session. connect()
+      // opens the brand chat in poster's own slot and stops with CONNECT FAILED if the login is really gone.
+      console.log(`[gate] no ChatGPT tab open: continuing, the brand chat opens in slot ${SLOT} (T3680)`);
+    } else if (verdict !== 'ok') {
+      const code = g.status || 1;
       if (code === 3) {
         // T2753: exit 3 = TAB BUSY (the tab's page thread did not answer; cookies were not the problem) — never re-login
         console.error(`⏳ TAB BUSY (session gate exit 3): the ChatGPT tab is busy, the session is fine. Retry in a minute.`);
@@ -1967,4 +1987,4 @@ if (require.main === module) main()
     if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(EXIT_TAB_BUSY); }
     console.error('ERROR:', e.message); process.exit(1);
   });   // T2790: requirable by test/t2790-stalled-send.test.js
-module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles, heartbeat, serverLanded };   // T3014: attachFiles for test/t3014-attach-wait
+module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles, heartbeat, serverLanded, sessionGateVerdict };   // T3014: attachFiles for test/t3014-attach-wait
