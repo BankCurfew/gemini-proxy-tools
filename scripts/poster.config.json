@@ -59,13 +59,14 @@
       "note": "ONE chat for all VIRAL posters; no new-chat per poster"
     },
     "iagencyaia-motivation": {
-      "chat_id": "6af12fbf-35dc-83ec-9c2c-87a7d901bd4d",
+      "chat_id": "6af13905-4fd0-83ec-86b9-eb04857897b5",
       "base_brand": "iagencyaia",
       "title": "MOTIVATION · Series 2026-09",
       "project": "iAgencyAIA",
-      "created": "2026-11-09T02:28:20.604Z",
+      "created": "2026-11-09T03:07:55.843Z",
       "set_by": "designer T2301 (bob chats) · new chat 9 Nov 2026 via dev-sanctioned new-chat",
-      "note": "ONE chat for all MOTIVATION posters; no new-chat per poster · 9 Nov 2026: new chat 6af12fbf after 6ab8d30e stuck server-side (async_status 3), dev-sanctioned new-chat; old chat kept"
+      "note": "ONE chat for all MOTIVATION posters; no new-chat per poster · 9 Nov 2026: new chat 6af12fbf after 6ab8d30e stuck server-side (async_status 3), dev-sanctioned new-chat; old chat kept",
+      "previous_chat_id": "6af12fbf-35dc-83ec-9c2c-87a7d901bd4d"
     },
     "iagencyaia-breaking": {
       "chat_id": "6ab8d38d-a198-83ec-8080-d6aa3a8d3cd1",
