@@ -10,6 +10,9 @@
   "stall_threshold_polls": 6,
   "max_retries": 1,
   "heartbeat_oracle": "Designer-Oracle",
+  "projects": {
+    "iAgencyAIA": "g-p-6a548bcae0f481918286e9fb63633e98"
+  },
   "brands": {
     "iagencyaia": {
       "chat_id": "6ab8b728-b008-83ec-b093-73409425bc64",

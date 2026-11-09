@@ -1646,6 +1646,22 @@ async function renameChat(page, slug) {
   if (!ok) throw new Error(`rename: title read back "${r.after}" ≠ config "${want}" (PATCH ${r.patch})`);
 }
 
+// T3830 (designer 9 Nov; 3rd time after ijourney ebf878b + dreambank-carousel 3f2b63c): new-chat MERGES into the brand
+// entry (a dropped base_brand = T599 ABORT on every send) and keeps the replaced id as previous_chat_id.
+function brandEntryAfterNewChat(existing, chatId, createdIso) {
+  if (!existing) return { chat_id: chatId, created: createdIso };
+  return { ...existing, chat_id: chatId, created: createdIso, previous_chat_id: existing.chat_id };
+}
+// T3830: a brand with a "project" starts its chat on that Project's page (poster.config.json projects.<name> = "g-p-<hex>"),
+// so the chat lives with the series chats. A project with no configured id is refused, never silently created outside it.
+function newChatStartUrl(entry, projects) {
+  if (!entry || !entry.project) return 'https://chatgpt.com/';
+  const gid = (projects || {})[entry.project];
+  if (!gid) throw new Error(`brand names project "${entry.project}" but poster.config.json has no projects.${entry.project} id (fix: add "projects": {"${entry.project}": "g-p-…"} from a series chat's gizmo_id)`);
+  if (!/^g-p-[a-f0-9]{16,64}$/.test(gid)) throw new Error(`projects.${entry.project} must look like g-p-<hex>, got ${String(gid).slice(0, 40)}`);
+  return `https://chatgpt.com/g/${gid}/project`;
+}
+
 async function newChat(page, rawBrandName) {
   const brandName = rawBrandName.toLowerCase();
   console.log(`[new-chat] Creating new ChatGPT chat for brand: ${brandName}`);
@@ -1656,8 +1672,13 @@ async function newChat(page, rawBrandName) {
   const newPage = page;
   const dropPage = async () => {};   // never close the slot tab
 
-  // Navigate to chatgpt.com home (fresh chat state)
-  await newPage.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 30000 }); await sleep(3000);
+  // Navigate to chatgpt.com home (fresh chat state), or the brand's Project page (T3830)
+  const priorEntry = (cfg.brands || {})[brandName];
+  let startUrl;
+  try { startUrl = newChatStartUrl(priorEntry, cfg.projects); } catch (e) { console.error(`[new-chat] FAILED: ${e.message}`); process.exitCode = 1; return; }
+  const wantProject = startUrl === 'https://chatgpt.com/' ? null : cfg.projects[priorEntry.project];
+  if (wantProject) console.log(`[new-chat] brand is in Project "${priorEntry.project}" → starting at ${startUrl}`);
+  await newPage.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }); await sleep(3000);
   await sleep(3000);
 
   // Verify we're on a clean home page, not redirected to an existing chat
@@ -1733,7 +1754,7 @@ async function newChat(page, rawBrandName) {
         if (!r.ok) return { ok: false, status: r.status };
         const j = await r.json();
         const done = Object.values(j.mapping || {}).some(n => n.message && n.message.author.role === 'assistant' && n.message.status === 'finished_successfully');
-        return { ok: done, status: r.status, temporary: !!j.is_temporary_chat };
+        return { ok: done, status: r.status, temporary: !!j.is_temporary_chat, gizmo_id: j.gizmo_id || null };
       } catch (e) { return { ok: false, status: 'error: ' + e.message }; }
     }, chatId);
   }
@@ -1743,14 +1764,20 @@ async function newChat(page, rawBrandName) {
     return;
   }
   console.log(`[new-chat] server confirms chat saved (HTTP ${persisted.status}, seed reply finished)`);
+  if (wantProject && persisted.gizmo_id !== wantProject) {   // T3830: never save a series chat that landed outside its Project
+    console.error(`[new-chat] FAILED: chat ${chatId} is in ${persisted.gizmo_id || 'no project'}, not ${priorEntry.project} (${wantProject}) — poster.config.json NOT changed`);
+    process.exitCode = 1;
+    return;
+  }
 
   // Save to config
-  if (!cfg.brands) cfg.brands = {};
-  cfg.brands[brandName] = { chat_id: chatId, created: new Date().toISOString() };
   // T3014: write the FILE's own content + this brand, never the merged cfg (that re-persisted code defaults, see 138af77,
-  // and would persist an env override such as POSTER_CDP_URL)
+  // and would persist an env override such as POSTER_CDP_URL). T3830: the brand entry is merged, not replaced.
   const onDisk = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')) : {};
-  onDisk.brands = { ...(onDisk.brands || {}), [brandName]: cfg.brands[brandName] };
+  const merged = brandEntryAfterNewChat((onDisk.brands || {})[brandName], chatId, new Date().toISOString());
+  if (!cfg.brands) cfg.brands = {};
+  cfg.brands[brandName] = merged;
+  onDisk.brands = { ...(onDisk.brands || {}), [brandName]: merged };
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(onDisk, null, 2), 'utf-8');
   console.log(`[new-chat] Saved to poster.config.json: brands.${brandName}.chat_id = ${chatId}`);
   console.log(`\n✅ Brand "${brandName}" ready. Use: node poster.js generate <type> <brief> --brand ${brandName}`);
@@ -1987,4 +2014,4 @@ if (require.main === module) main()
     if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(EXIT_TAB_BUSY); }
     console.error('ERROR:', e.message); process.exit(1);
   });   // T2790: requirable by test/t2790-stalled-send.test.js
-module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles, heartbeat, serverLanded, sessionGateVerdict };   // T3014: attachFiles for test/t3014-attach-wait
+module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles, heartbeat, serverLanded, sessionGateVerdict, brandEntryAfterNewChat, newChatStartUrl };   // T3014: attachFiles for test/t3014-attach-wait
