@@ -192,6 +192,15 @@
       "note": "ONE chat for per-slide cinematic carousel backgrounds for DreamBank social (IG/FB/TikTok/YT); no people, no text/logos in images, no real faces; base dreambank = own forbid list in poster.js (no iAgency / AIA red / WealthBanks tokens)",
       "chat_id": "6ae843cc-d2fc-83ec-a12e-f80fe02fa21f",
       "chat_created": "2026-11-02T08:03:30.863Z"
+    },
+    "iagencyaia-kit": {
+      "base_brand": "iagencyaia",
+      "title": "KIT · 2026-11 · one hero one line",
+      "project": "iAgencyAIA",
+      "created": "2026-11-12T05:10:01.358Z",
+      "set_by": "designer T4060 (bob C 12:05: white + dark samples for ATW + MB)",
+      "note": "ONE chat for the T4060 poster-kit samples (white DNA + dark proposal); keeps the experiment out of the live S2 news chat; poster gates apply",
+      "chat_id": "6af54a23-188c-83ec-94c0-051d4f443d65"
     }
   },
   "archived": {
