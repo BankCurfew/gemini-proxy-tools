@@ -199,7 +199,7 @@
       "project": "iAgencyAIA",
       "created": "2026-11-12T05:10:01.358Z",
       "set_by": "designer T4060 (bob C 12:05: white + dark samples for ATW + MB)",
-      "note": "LIVE kit chat from 13 Nov 2569 (แบงค์ REVIEW T4060 13:05 + bob 13:07): ATW · MarketBrief only (motivation + H&W keep their styles, แบงค์ 13:25), white + dark base (rule: Designer-Oracle output/t4060/KIT.md); run via Designer-Oracle scripts/kit/kit-gen.sh with POSTER_SLOT=L2; poster gates apply; roll to a new chat near the image limit",
+      "note": "LIVE kit chat from 13 Nov 2569 (แบงค์ REVIEW T4060 13:05 + bob 13:07): ATW · MarketBrief · insurance news (v1.3.4; motivation + H&W keep their styles, แบงค์ 13:25), white + dark base (rule: Designer-Oracle output/t4060/KIT.md); run via Designer-Oracle scripts/kit/kit-gen.sh with POSTER_SLOT=L2; poster gates apply; roll to a new chat near the image limit",
       "chat_id": "6af54a23-188c-83ec-94c0-051d4f443d65"
     }
   },
