@@ -201,6 +201,14 @@
       "set_by": "designer T4060 (bob C 12:05: white + dark samples for ATW + MB)",
       "note": "LIVE kit chat from 13 Nov 2569 (แบงค์ REVIEW T4060 13:05 + bob 13:07): ATW · MarketBrief · insurance news (v1.3.4; motivation + H&W keep their styles, แบงค์ 13:25), white + dark base (rule: Designer-Oracle output/t4060/KIT.md); run via Designer-Oracle scripts/kit/kit-gen.sh with POSTER_SLOT=L2; poster gates apply; roll to a new chat near the image limit",
       "chat_id": "6af54a23-188c-83ec-94c0-051d4f443d65"
+    },
+    "iagencyaia-newsad": {
+      "chat_id": "6af56d54-a584-83ec-ad92-17978181f280",
+      "created": "2026-11-12T07:40:12.311Z",
+      "base_brand": "iagencyaia",
+      "project": "iAgencyAIA",
+      "set_by": "designer T4064 (แบงค์ 14:4x: design with GPT from his 8 refs, logo+footer overlaid after)",
+      "note": "T4064 news-poster redesign chat: refs → GPT design conversation; no logo/footer drawn"
     }
   },
   "archived": {
