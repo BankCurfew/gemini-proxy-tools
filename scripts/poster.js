@@ -100,6 +100,9 @@ const BRAND_FORBID = {
   wewealth: ['iagency', '@iagencyaia', 'd31145', 'c8102e', 'wealthbanks', 'น้องวิง', 'วิงแซ่บ'],
   // T3585 (designer ask, dev default 2 Nov): DreamBank = แบงค์'s own social brand — no iAgency, no AIA red, no WealthBanks
   dreambank: ['iagency', 'i-agency', '@iagencyaia', 'd31145', 'c8102e', 'wealthbanks', 'wealthbanks.net', 'wealth-bank', 'prestige white'],
+  // T4225 (bob lift 18:39, designer's config note "never iAgencyAIA/WB here"): ACEP-only project chat — no iAgency, no AIA red,
+  // no WealthBanks, no other own brand. Keyed by the slug itself (no base_brand in config); a 2nd ACEP chat → base_brand "acep-style"
+  'acep-style': ['iagency', 'i-agency', '@iagencyaia', 'd31145', 'c8102e', 'wealthbanks', 'wealthbanks.net', 'wealth-bank', 'prestige white', 'wewealth', 'dreambank'],
 };
 // Canonical brand name each slug must self-declare in a composed prompt.
 const BRAND_SELF_NAME = {
