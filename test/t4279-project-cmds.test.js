@@ -102,6 +102,14 @@ check('a refusal writes nothing (md5 same)', md5(f) === h);
   const [rc3, m3] = await sub(tracked);
   check('C1 project-instructions set: positive control, tracked .md reaches the browser', rc3 === 'threw' && /browser touched/.test(m3), `${rc3} ${m3.slice(0, 80)}`);
   fs.rmSync(tmp, { recursive: true, force: true });
+  // ── stale busy (15 Nov 22:2x live: dreambank-carousel newest reply in_progress for 19144 min → move-chat exit 75 forever) ──
+  const NOW = 1_800_000_000;
+  const mp = (...ms) => Object.fromEntries(ms.map((m, i) => [String(i), { message: { author: { role: m.role || 'assistant' }, status: m.status, create_time: m.t } }]));
+  const cb = (m) => { try { return P.chatBusy(m, NOW); } catch (e) { return 'threw ' + e.message; } };
+  check('busy: newest reply in_progress 2 min old = busy', cb(mp({ status: 'finished_successfully', t: NOW - 900 }, { status: 'in_progress', t: NOW - 120 })) === true, String(cb(mp({ status: 'in_progress', t: NOW - 120 }))));
+  check('busy: newest reply in_progress 13 days old = stale, NOT busy', cb(mp({ status: 'in_progress', t: NOW - 19144 * 60 })) === false, String(cb(mp({ status: 'in_progress', t: NOW - 19144 * 60 }))));
+  check('busy: newest finished = not busy', cb(mp({ status: 'in_progress', t: NOW - 300 }, { status: 'finished_successfully', t: NOW - 60 })) === false);
+  check('busy: no assistant reply = not busy', cb(mp({ role: 'user', status: 'finished_successfully', t: NOW })) === false);
   const fails = results.filter((x) => !x).length;
 console.log(`\n${results.length - fails}/${results.length} pass`);
 process.exit(fails ? 1 : 0);
