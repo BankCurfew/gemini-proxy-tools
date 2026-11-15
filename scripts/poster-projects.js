@@ -20,13 +20,15 @@ const GID_RE = /^g-p-[0-9a-f]{32}$/;
 const MAX_PER_UPLOAD = 10;      // researcher playbook @ed1a7fc: max 10 files per upload
 const SIDEBAR_PAGE = 20;        // limit=100 → HTTP 422 (probe 7); the UI itself asks for 20
 const SIDEBAR_MAX_PAGES = 50;
+const NO_SUB_CMDS = new Set(['new-chat', 'create-project', 'move-chat']);   // T4279: flags only, no sub-command word
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── pure ──
 
 /** argv after `node poster.js` → { cmd, sub, project, title, rest }. --brand/--force/--dry-run are left to poster.js. */
 function parseArgs(args) {
-  const out = { cmd: args[0], sub: null, project: null, title: null, rest: [] };
+  const out = { cmd: args[0], sub: null, project: null, title: null, name: null, instructionsFile: null, rest: [] };
+  const noSub = NO_SUB_CMDS.has(out.cmd);
   const take = (flag, i) => {
     const eq = args[i].startsWith(`${flag}=`) ? args[i].slice(flag.length + 1) : null;
     if (eq !== null) return [eq, i];
@@ -37,12 +39,52 @@ function parseArgs(args) {
     const a = args[i];
     if (a === '--project' || a.startsWith('--project=')) { [out.project, i] = take('--project', i); continue; }
     if (a === '--title' || a.startsWith('--title=')) { [out.title, i] = take('--title', i); continue; }
+    if (a === '--name' || a.startsWith('--name=')) { [out.name, i] = take('--name', i); continue; }
+    if (a === '--instructions-file' || a.startsWith('--instructions-file=')) { [out.instructionsFile, i] = take('--instructions-file', i); continue; }
     if (a === '--brand') { i++; continue; }
     if (a === '--force' || a === '--dry-run') continue;
-    if (out.cmd !== 'new-chat' && out.sub === null) { out.sub = a; continue; }
+    if (noSub) throw new Error(`${out.cmd}: unexpected argument "${a}" (names with spaces need quotes)`);
+    if (out.sub === null) { out.sub = a; continue; }
     out.rest.push(a);
   }
   return out;
+}
+
+// ── pure: poster.config.json edits (T4279). Each returns { changed, next } and never touches the file. ──
+
+const fix = (cmd) => ` · fix: ${cmd}`;   // GR#8b: every refusal ends with the command that fixes it
+
+/** projects.<name> = gid. Same name + same id = no change; same name + another id = refuse (never repoint silently). */
+function configWithProject(onDisk, name, gid) {
+  const n = String(name || '').trim();
+  if (!n) throw new Error('create-project needs --name <name>' + fix('node poster.js create-project --name "<name>"'));
+  if (!GID_RE.test(gid || '')) throw new Error(`project id must be g-p-<32 hex>, got ${String(gid).slice(0, 40)}` + fix('node poster.js project-files list --project "<name>"'));
+  const cur = (onDisk.projects || {})[n];
+  if (cur === gid) return { changed: false, next: onDisk };
+  if (cur) throw new Error(`poster.config.json already projects.${n} = ${cur}, server says ${gid}: two projects or a stale id` + fix(`edit projects["${n}"] in poster.config.json to the live id, then re-run`));
+  return { changed: true, next: { ...onDisk, projects: { ...(onDisk.projects || {}), [n]: gid } } };
+}
+
+/** brands.<brand>.project = <name>; the project must already be in projects (create-project writes it). */
+function configWithBrandProject(onDisk, brand, name) {
+  const b = String(brand || '').trim().toLowerCase();
+  const n = String(name || '').trim();
+  if (!b) throw new Error('move-chat needs --brand <brand>' + fix('node poster.js move-chat --brand <brand> --project "<name>"'));
+  const entry = (onDisk.brands || {})[b];
+  if (!entry) throw new Error(`brand "${b}" is not in poster.config.json (brands: ${Object.keys(onDisk.brands || {}).join(', ')})` + fix(`node poster.js move-chat --brand <one of the brands above> --project "${n}"`));
+  if (!entry.chat_id) throw new Error(`brands.${b} has no chat_id, nothing to move` + fix(`node poster.js new-chat --brand ${b}`));
+  const gid = (onDisk.projects || {})[n];
+  if (!gid) throw new Error(`poster.config.json has no projects["${n}"] (projects: ${Object.keys(onDisk.projects || {}).map((k) => `"${k}"`).join(', ')})` + fix(`node poster.js create-project --name "${n}"`));
+  if (entry.project === n) return { changed: false, next: onDisk, gid, chatId: entry.chat_id };
+  return { changed: true, next: { ...onDisk, brands: { ...onDisk.brands, [b]: { ...entry, project: n } } }, gid, chatId: entry.chat_id };
+}
+
+/** 2-space JSON like poster.js, the file's own trailing newline kept (git has one, new-chat drops it), temp file + rename. */
+function writeConfigAtomic(file, obj) {
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.tmp`);
+  const nl = fs.existsSync(file) && fs.readFileSync(file, 'utf-8').endsWith('\n') ? '\n' : '';
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + nl, 'utf-8');
+  fs.renameSync(tmp, file);
 }
 
 /** One project for <name|g-p-id>, or throw. Fails closed on 0 or 2+ matches (never "the first one"). */
@@ -364,8 +406,154 @@ async function newProjectChat(page, a, { sendAndConfirm }) {
   return 0;
 }
 
+// ── T4279: create-project + move-chat ──
+
+const readConfig = (file) => JSON.parse(fs.readFileSync(file, 'utf-8'));
+
+/** Refusal text (with its fix line) for what the config alone can refuse, or null. Runs before the browser is touched. */
+function precheck(cmd, a, brand, configPath) {
+  try {
+    if (cmd === 'create-project') {
+      if (!a.name || !a.name.trim()) return 'create-project needs --name <name>' + fix('node poster.js create-project --name "<name>"');
+      if (a.instructionsFile) {
+        let st = null; try { st = fs.statSync(a.instructionsFile); } catch {}
+        if (!st || !st.isFile()) return `--instructions-file ${a.instructionsFile}: not a readable file` + fix('ls -l <file>');
+        if (!fs.readFileSync(a.instructionsFile, 'utf-8').trim()) return `--instructions-file ${a.instructionsFile} is empty` + fix('write the instructions into the file first');
+      }
+      const cur = (readConfig(configPath).projects || {})[a.name.trim()];
+      if (cur && !GID_RE.test(cur)) return `projects["${a.name.trim()}"] = ${String(cur).slice(0, 40)} is not a g-p id` + fix('edit poster.config.json');
+    }
+    if (cmd === 'move-chat') {
+      if (!a.project) return 'move-chat needs --project <name>' + fix('node poster.js move-chat --brand <brand> --project "<name>"');
+      configWithBrandProject(readConfig(configPath), brand, a.project);
+    }
+  } catch (e) { return e.message; }
+  return null;
+}
+
+/** The sidebar "New project" → name → Create. Only the UI makes projects (no public API, researcher playbook @ed1a7fc). */
+async function createProjectUI(page, name) {
+  await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await sleep(5000);
+  const btn = await page.evaluateHandle(() => [...document.querySelectorAll('nav button, nav a, nav [role="button"], aside button')]
+    .find((e) => /^(new project|โปรเจกต์ใหม่|สร้างโปรเจกต์)/i.test((e.getAttribute('aria-label') || e.textContent || '').trim())) || null);
+  if (!(await btn.evaluate((e) => !!e))) throw new Error('no "New project" control in the sidebar (English or Thai label)' + fix('open chatgpt.com in the slot window, check the sidebar shows Projects'));
+  await btn.click(); await sleep(1500);
+  const inp = await page.waitForSelector('[role="dialog"] input', { timeout: 10000 }).catch(() => null);
+  if (!inp) throw new Error('"New project" opened no dialog with a name field' + fix('re-run; if it repeats, run Dev-Oracle output/t4279/probe-create-move.mjs'));
+  await inp.type(name, { delay: 20 }); await sleep(500);
+  let clicked = false;
+  for (const b of await page.$$('[role="dialog"] button')) {
+    if (/^(create project|สร้างโปรเจกต์|create|สร้าง)$/i.test((await b.evaluate((e) => e.textContent || '')).trim())) { await b.click(); clicked = true; break; }
+  }
+  if (!clicked) { await page.keyboard.press('Escape'); throw new Error('no "Create project" button in the dialog (English or Thai)' + fix('run Dev-Oracle output/t4279/probe-create-move.mjs')); }
+  await sleep(4000);
+}
+
+async function createProjectCmd(page, a, { configPath, dryRun }) {
+  const name = a.name.trim();
+  const named = async () => (await listProjects(page)).filter((p) => (p.name || '').trim() === name);
+  let hits = await named();
+  if (hits.length > 1) return refuse(`${hits.length} projects named "${name}" (${hits.map((p) => p.id).join(', ')}): delete the extra in the UI` + fix(`node poster.js project-files list --project <g-p id>`));
+  let made = false;
+  if (!hits.length) {
+    if (dryRun) { console.log(`[create-project] would create "${name}" (not in the project list)`); return 0; }
+    await createProjectUI(page, name);
+    for (let i = 0; i < 10 && !hits.length; i++) { hits = await named(); if (!hits.length) await sleep(2000); }
+    if (hits.length !== 1) return refuse(`[create-project] after Create the list holds ${hits.length} project(s) named "${name}"` + fix(`node poster.js create-project --name "${name}"   (re-run = idempotent)`));
+    made = true;
+  }
+  const gid = hits[0].id;
+  if (a.instructionsFile) {
+    const text = fs.readFileSync(a.instructionsFile, 'utf-8');
+    if ((await readProject(page, gid)).instructions !== text) {
+      if (dryRun) console.log(`[create-project] would set instructions from ${a.instructionsFile}`);
+      else {
+        await setInstructions(page, gid, text);
+        if ((await readProject(page, gid)).instructions !== text) return refuse(`[create-project] instructions read back ≠ ${a.instructionsFile}` + fix(`node poster.js project-instructions set --project ${gid} ${a.instructionsFile}`));
+      }
+    }
+  }
+  const c = configWithProject(readConfig(configPath), name, gid);
+  if (c.changed && !dryRun) writeConfigAtomic(configPath, c.next);
+  console.log(`[create-project] "${name}" ${made ? 'created' : 'already exists (nothing created)'} · projects["${name}"] ${c.changed ? (dryRun ? 'would be added' : 'added') : 'unchanged'}`);
+  console.log(gid);
+  return 0;
+}
+
+/** { gizmo_id, title, busy } of a chat from the server; busy = the newest assistant message is not finished. */
+async function readChat(page, chatId) {
+  const r = await api(page, 'GET', `/backend-api/conversation/${chatId}`);
+  if (r.status !== 200 || !r.json) throw new Error(`chat ${chatId}: HTTP ${r.status}${r.error ? ` ${r.error}` : ''}` + fix('open the chat in the browser; deleted or another account?'));
+  const msgs = Object.values(r.json.mapping || {}).map((n) => n.message).filter((m) => m && m.author && m.author.role === 'assistant');
+  const last = msgs.sort((x, y) => (x.create_time || 0) - (y.create_time || 0)).pop();
+  return { gizmo_id: r.json.gizmo_id || null, title: r.json.title || '', busy: !!last && last.status === 'in_progress' };
+}
+
+/** Does the project's own chat list (sidebar, conversations per project) hold this chat? Walks the cursor like the UI. */
+async function projectHasChat(page, gid, chatId) {
+  let cursor = null; let pages = 0;
+  do {
+    const q = `conversations_per_gizmo=20&limit=${SIDEBAR_PAGE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+    const r = await api(page, 'GET', `/backend-api/gizmos/snorlax/sidebar?${q}`);
+    if (r.status !== 200 || !r.json) return null;
+    for (const i of r.json.items || []) {
+      const g = i.gizmo && i.gizmo.gizmo;
+      if (g && g.id === gid) return ((i.conversations && i.conversations.items) || []).some((c) => c.id === chatId);
+    }
+    cursor = r.json.cursor || null; pages++;
+  } while (cursor && pages < SIDEBAR_MAX_PAGES);
+  return null;
+}
+
+/** Chat options menu → "Move to project" → the project, by exact name (English or Thai labels; fail closed on neither). */
+async function moveChatUI(page, chatId, name) {
+  await page.goto(`https://chatgpt.com/c/${chatId}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await sleep(5000);
+  const opt = await page.$('[data-testid="conversation-options-button"]');
+  if (!opt) throw new Error('no chat options button on the chat page' + fix('run Dev-Oracle output/t4279/probe-create-move.mjs'));
+  await opt.click(); await sleep(1200);
+  const mv = await page.evaluateHandle(() => [...document.querySelectorAll('[role="menuitem"]')].find((e) => /move to project|ย้ายไป/i.test(e.textContent || '')) || null);
+  if (!(await mv.evaluate((e) => !!e))) { await page.keyboard.press('Escape'); throw new Error('no "Move to project" in the chat menu (English or Thai)' + fix('run Dev-Oracle output/t4279/probe-create-move.mjs')); }
+  await mv.hover(); await sleep(1200);
+  const pick = () => page.evaluateHandle((n) => [...document.querySelectorAll('[role="menuitem"],[role="menuitemradio"],[role="option"],[role="dialog"] button')]
+    .filter((e) => (e.textContent || '').trim() === n), name);
+  let found = await pick();
+  if (!(await found.evaluate((l) => l.length))) { await mv.click(); await sleep(1500); found = await pick(); }   // a dialog instead of a submenu
+  const n = await found.evaluate((l) => l.length);
+  if (n !== 1) { await page.keyboard.press('Escape'); throw new Error(`"Move to project" lists ${n} entries named "${name}" (lazy list: scroll/search not reached it?)` + fix('run Dev-Oracle output/t4279/probe-create-move.mjs')); }
+  await found.evaluate((l) => l[0].click());
+  await sleep(3000);
+}
+
+async function moveChatCmd(page, a, { brand, configPath, dryRun }) {
+  const pre = configWithBrandProject(readConfig(configPath), brand, a.project);
+  const name = a.project.trim();
+  const live = (await listProjects(page)).find((p) => p.id === pre.gid);
+  if (!live) return refuse(`projects["${name}"] = ${pre.gid} is not in this account's project list (deleted?)` + fix(`node poster.js create-project --name "${name}"`));
+  let chat = await readChat(page, pre.chatId);
+  const before = chat.gizmo_id;
+  if (chat.gizmo_id !== pre.gid) {
+    if (chat.busy) return EXIT_TAB_BUSY;
+    if (dryRun) { console.log(`[move-chat] would move ${brand} ${pre.chatId} "${chat.title}" from ${before || 'no project'} → "${name}" ${pre.gid}`); return 0; }
+    await moveChatUI(page, pre.chatId, live.name);
+    for (let i = 0; i < 8 && chat.gizmo_id !== pre.gid; i++) { await sleep(2000); chat = await readChat(page, pre.chatId); }
+    if (chat.gizmo_id !== pre.gid) return refuse(`[move-chat] server says chat ${pre.chatId} is in ${chat.gizmo_id || 'no project'}, not "${name}" ${pre.gid} · config not changed` + fix(`node poster.js move-chat --brand ${brand} --project "${name}"`));
+  }
+  const listed = await projectHasChat(page, pre.gid, pre.chatId);
+  if (listed === false) return refuse(`[move-chat] chat's project = ${pre.gid} but the project's chat list does not hold ${pre.chatId} · config not changed` + fix(`node poster.js move-chat --brand ${brand} --project "${name}"`));
+  if (!dryRun && pre.changed) writeConfigAtomic(configPath, pre.next);
+  console.log(`[move-chat] ${brand} ${pre.chatId} "${chat.title}": ${before === pre.gid ? 'already in' : `${before || 'no project'} →`} "${name}" ${pre.gid} · project list ${listed === null ? 'not readable (chat-side read-back only)' : 'holds it'} · brands.${brand}.project ${pre.changed ? (dryRun ? 'would be set' : 'set') : 'unchanged'}`);
+  console.log(`https://chatgpt.com/c/${pre.chatId}`);
+  return 0;
+}
+
+const EXIT_TAB_BUSY = 75;
+
 module.exports = {
+  precheck, createProjectCmd, moveChatCmd, readChat,
   GID_RE, MAX_PER_UPLOAD, CAP, parseArgs, matchProject, planAdd, planRemove,
+  configWithProject, configWithBrandProject, writeConfigAtomic,
   listProjects, resolveProject, readProject, addFiles, removeFiles, setInstructions, gotoProject,
   projectFilesCmd, projectInstructionsCmd, newProjectChat,
 };

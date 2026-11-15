@@ -74,7 +74,8 @@ function getActiveBrandChatId() {
 
 // Commands that don't need --brand
 // T4249: the project commands name a ChatGPT Project (--project), not a brand chat
-const BRAND_EXEMPT_CMDS = new Set(['help', 'resolve', 'status', 'st', 'images', 'imgs', 'project-files', 'project-instructions']);
+// T4279: create-project names no brand; move-chat checks its --brand itself (refusal with a fix line, before any browser work)
+const BRAND_EXEMPT_CMDS = new Set(['help', 'resolve', 'status', 'st', 'images', 'imgs', 'project-files', 'project-instructions', 'create-project', 'move-chat']);
 const currentCmd = process.argv[2];
 let BRAND_CHAT_URL;
 if (BRAND_EXEMPT_CMDS.has(currentCmd) || !currentCmd) {
@@ -1838,6 +1839,12 @@ Commands:
                       (export to md)
   project-instructions get|set --project <name|g-p-id> [file]  get = print (or write to file) · set = Project
                       settings → Save, read back byte-equal
+  create-project --name <name> [--instructions-file <md>]  Create a ChatGPT Project (sidebar → New project), print
+                      its g-p id, save projects.<name>; a name that already exists once = its id, nothing created
+                      (2+ = refused) · --instructions-file = Project settings → Save, read back byte-equal
+  move-chat --brand <brand> --project <name>  Move the brand's chat into a Project from projects (chat menu →
+                      Move to project), read back from the server (chat's project + the project's chat list), save
+                      brands.<brand>.project · a generation running in it = TAB BUSY 75 · already there = no-op
   rename --brand <name>    Set that chat's ChatGPT title to brands.<name>.title (API only, no navigation)
   prompt <text>       Send raw prompt to ChatGPT (--brand required)
   wait [taskId]       Wait for current generation (with heartbeat)
@@ -1895,6 +1902,18 @@ Examples:
     return;
   }
 
+  // T4249: project commands parse their own flags from the raw argv (and refuse a bad one before any browser work)
+  // T4279: so this runs BEFORE the T1097 session gate (that gate spawns a CDP check: a typo'd brand got a session error)
+  const PROJECT_CMDS = new Set(['project-files', 'project-instructions', 'create-project', 'move-chat']);
+  let projArgs = null;
+  if (PROJECT_CMDS.has(cmd) || (cmd === 'new-chat' && process.argv.some((x) => x === '--project' || x.startsWith('--project=')))) {
+    try { projArgs = projects.parseArgs(process.argv.slice(2)); } catch (e) { console.error(`🚫 ${e.message}`); process.exitCode = 1; return; }
+    if (cmd === 'new-chat' && BRAND_FLAG) { console.error('🚫 new-chat takes --brand OR --project, not both'); process.exitCode = 1; return; }
+    // T4279: config-level refusals (unknown brand / project, bad --name / --instructions-file) before the browser is touched
+    const pre = projects.precheck(cmd, projArgs, BRAND_FLAG, CONFIG_PATH);
+    if (pre) { console.error(`🚫 ${pre}`); process.exitCode = 1; return; }
+  }
+
   // T1097 step-0: verify ChatGPT session is alive before connecting
   const ensureScript = path.join(process.env.HOME || '/home/curfew',
     'repos/github.com/BankCurfew/Admin-Oracle/scripts/chatgpt-session-ensure.sh');
@@ -1929,13 +1948,6 @@ Examples:
   // T2775: rename is API-only, so it also runs in whatever ChatGPT tab is open (never navigates it)
   // T2801: a render stalls Chrome's CDP attach, so wait for it BEFORE connecting (every command, said out loud), and a
   // connect that still gets no answer ends as TAB BUSY (exit 75) instead of hanging with no output
-  // T4249: project commands parse their own flags from the raw argv (and refuse a bad one before any browser work)
-  const PROJECT_CMDS = new Set(['project-files', 'project-instructions']);
-  let projArgs = null;
-  if (PROJECT_CMDS.has(cmd) || (cmd === 'new-chat' && process.argv.some((x) => x === '--project' || x.startsWith('--project=')))) {
-    try { projArgs = projects.parseArgs(process.argv.slice(2)); } catch (e) { console.error(`🚫 ${e.message}`); process.exitCode = 1; return; }
-    if (cmd === 'new-chat' && BRAND_FLAG) { console.error('🚫 new-chat takes --brand OR --project, not both'); process.exitCode = 1; return; }
-  }
   let browser, page;
   try {
     await waitRenderIdle('connect');
@@ -2012,6 +2024,12 @@ Examples:
         break;
       case 'project-instructions':
         process.exitCode = await projects.projectInstructionsCmd(page, projArgs, { dryRun: DRY_RUN });
+        break;
+      case 'create-project':
+        process.exitCode = await projects.createProjectCmd(page, projArgs, { configPath: CONFIG_PATH, dryRun: DRY_RUN });
+        break;
+      case 'move-chat':
+        process.exitCode = await projects.moveChatCmd(page, projArgs, { brand: BRAND_FLAG, configPath: CONFIG_PATH, dryRun: DRY_RUN });
         break;
       case 'new-chat': {
         if (projArgs) { process.exitCode = await projects.newProjectChat(page, projArgs, { sendAndConfirm }); break; }
