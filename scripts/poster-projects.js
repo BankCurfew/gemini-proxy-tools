@@ -14,6 +14,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const { checkSources } = require('./project-source-gate');
 
 const GID_RE = /^g-p-[0-9a-f]{32}$/;
 const MAX_PER_UPLOAD = 10;      // researcher playbook @ed1a7fc: max 10 files per upload
@@ -254,8 +255,12 @@ const CAP = 40;   // bob 15 Nov 12:0x: plan = Pro (แบงค์) → 40 files
 const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round((n || 0) / 1024))} KB`);
 const refuse = (msg) => { console.error(`🚫 ${msg}`); return 1; };
 
-async function projectFilesCmd(page, a, { browserPath, dryRun }) {
+async function projectFilesCmd(page, a, { browserPath, dryRun, sourceGate = checkSources }) {   // sourceGate: tests of the other rules pass a stub
   if (!['add', 'list', 'remove'].includes(a.sub)) return refuse('usage: project-files add|list|remove --project <name|g-p-id> <files…>');
+  if (a.sub === 'add') {   // T4249 F2: every source must be content the pre-push scan read; checked before the page is touched
+    const g = sourceGate(a.rest);
+    if (!g.ok) return refuse(`[project-files] nothing uploaded, ${g.refused.length} file(s) refused:\n  ${g.refused.map((r) => r.reason).join('\n  ')}`);
+  }
   const p = await resolveProject(page, a.project);
   const cur = await readProject(page, p.id);
   const max = Math.min(cur.max, CAP);

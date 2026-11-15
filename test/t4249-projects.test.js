@@ -89,7 +89,7 @@ const quiet = async (fn) => {   // run a command, capture its console lines
   try { return { code: await fn(), out: out.join('\n') }; } finally { console.log = ol; console.error = oe; }
 };
 const files3 = [1, 2, 3].map((i) => ({ name: `s${i}.txt`, size: 2048 * i, file_id: `file_${i}` }));
-const deps = { browserPath: async (_p, f) => f, dryRun: false };
+const deps = { browserPath: async (_p, f) => f, dryRun: false, sourceGate: () => ({ ok: true, refused: [] }) };   // T4249 F2 gate has its own test (t4249-source-gate)
 
 (async () => {
   let pg = fakePage(files3);
