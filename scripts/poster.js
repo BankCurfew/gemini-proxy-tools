@@ -1828,10 +1828,12 @@ Commands:
   new-chat --project <name|g-p-id> --title <t>  Open a titled chat INSIDE a Project (starts with its sources +
                       instructions), print its URL; poster.config.json is not changed
   project-files list|add|remove --project <name|g-p-id> [files…]  Project Sources: list = name + size ·
-                      add uploads through the Sources UI (≤10 per batch, refuses past 40 (Pro) or a name already there,
-                      all-or-nothing) · remove by file name · each change read back from the server
+                      add uploads through the Sources UI (≤10 per batch; every file pre-checked, one bad = nothing sent:
+                      past 40 (Pro) or a name already there; a failure mid-run is reported by name, files already done
+                      stay) · remove by file name · each change read back from the server
                       ⚠️ sources upload to OpenAI and stay there: brand, style or reference material only, NO customer
-                      data, NO ψ/ files · text sources (md/pdf/txt) only from a pushed commit (pre-push scan ran on it)
+                      data, NO ψ/ files · md/txt only, from a pushed commit (pre-push scan ran on it) · NO PDF or other
+                      binary until the source gate ships (the scan skips binaries)
   project-instructions get|set --project <name|g-p-id> [file]  get = print (or write to file) · set = Project
                       settings → Save, read back byte-equal
   rename --brand <name>    Set that chat's ChatGPT title to brands.<name>.title (API only, no navigation)
