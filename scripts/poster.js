@@ -7,7 +7,7 @@
 // Task: gemini-proxy-tools#13
 
 const puppeteer = require('puppeteer-core');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { POSTER_IMG_SELECTOR, posterImageKeys, newestUnseen } = require('./poster-image-matcher');
@@ -559,8 +559,7 @@ function qaGate(filePath) {
 
   // Check dimensions via ImageMagick identify
   try {
-    const { execSync } = require('child_process');
-    const dims = execSync(`identify -format "%wx%h" "${filePath}"`, { timeout: 5000 }).toString().trim();
+    const dims = execFileSync('identify', ['-format', '%wx%h', filePath], { timeout: 5000 }).toString().trim();   // argv, no shell (T4249)
     if (dims !== '1080x1920') {
       return { pass: false, reason: `wrong dimensions: ${dims} (required: 1080x1920)` };
     }
@@ -981,7 +980,8 @@ const ATTACH_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
 async function browserPath(page, f) {
   const onWindows = await page.evaluate(() => navigator.userAgent.includes('Windows'));
   if (!onWindows) return f;
-  try { return execSync(`wslpath -w ${JSON.stringify(f)}`, { encoding: 'utf-8' }).trim(); } catch { return f; }
+  // argv, not a shell: `$(...)` in a file name must not run (security LOW on #68, T4249)
+  try { return execFileSync('wslpath', ['-w', f], { encoding: 'utf-8' }).trim(); } catch { return f; }
 }
 
 // Success = one 200 from /backend-api/files/process_upload_stream per file (the upload finished server-side).
@@ -1833,6 +1833,8 @@ Commands:
   project-files list|add|remove --project <name|g-p-id> [files…]  Project Sources: list = name + size ·
                       add uploads through the Sources UI (≤10 per batch, refuses past 40 (Pro) or a name already there,
                       all-or-nothing) · remove by file name · each change read back from the server
+                      ⚠️ sources upload to OpenAI and stay there: brand, style or reference material only, NO customer
+                      data, NO ψ/ files · text sources (md/pdf/txt) only from a pushed commit (pre-push scan ran on it)
   project-instructions get|set --project <name|g-p-id> [file]  get = print (or write to file) · set = Project
                       settings → Save, read back byte-equal
   rename --brand <name>    Set that chat's ChatGPT title to brands.<name>.title (API only, no navigation)
@@ -2042,4 +2044,4 @@ if (require.main === module) main()
     if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(EXIT_TAB_BUSY); }
     console.error('ERROR:', e.message); process.exit(1);
   });   // T2790: requirable by test/t2790-stalled-send.test.js
-module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles, heartbeat, serverLanded, sessionGateVerdict, brandEntryAfterNewChat, newChatStartUrl };   // T3014: attachFiles for test/t3014-attach-wait
+module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles, heartbeat, serverLanded, sessionGateVerdict, brandEntryAfterNewChat, newChatStartUrl, browserPath, qaGate };   // T3014: attachFiles for test/t3014-attach-wait
