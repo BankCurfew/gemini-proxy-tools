@@ -7,6 +7,7 @@
 //               source `X.pdf.url` (pushed, one https URL)
 //   png/jpg/jpeg/webp/gif → same, and only from a brand-asset folder named `project-sources` or `*-project-sources`
 //   anything else (docx, xlsx, zip …) → refused: export it to md
+// Every path (source, twin, .url) must be its own real path: no symlink anywhere in it, and nothing under ψ/.
 // All-or-nothing: the caller uploads nothing when any file is refused. git/pdftotext/pdfinfo run with argv, no shell.
 'use strict';
 const fs = require('fs');
@@ -20,7 +21,19 @@ const MIN_CHARS_PER_PAGE = 100;
 const BRAND_DIR_RE = /^(.+-)?project-sources$/;
 
 const run = (cmd, args, cwd) => execFileSync(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+const isLink = (f) => { try { return fs.lstatSync(f).isSymbolicLink(); } catch { return false; } };
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+
+/** S1/S2 (security on #70): git tracks a symlink's link text, the upload reads its target, so a tracked + pushed
+ *  link can carry an untracked file from anywhere. Refuse any link in the path; refuse anything under ψ/ (C1). */
+function realProblem(file) {
+  const base = path.basename(file);
+  let real;
+  try { real = fs.realpathSync(file); } catch { return `${base}: cannot resolve the path (missing file or broken link)`; }
+  if (real !== file) return `${base}: is or sits under a symlink (${file} → ${real}); use the real file`;
+  if (real.split(path.sep).includes('ψ')) return `${base}: is under ψ/ (oracle brain files never go up as sources)`;
+  return null;
+}
 
 /** null when the file is tracked, unchanged since its last commit, and that commit is on a remote; else the reason. */
 function pushedProblem(file) {
@@ -39,13 +52,13 @@ function pushedProblem(file) {
 function pdfProblem(file) {
   const base = path.basename(file);
   const url = file + '.url'; const twin = file + '.txt';
-  if (fs.existsSync(url)) {
-    const p = pushedProblem(url); if (p) return `public source: ${p}`;
+  if (fs.existsSync(url) || isLink(url)) {
+    const p = realProblem(url) || pushedProblem(url); if (p) return `public source: ${p}`;
     if (!/^https:\/\/\S+\s*$/.test(fs.readFileSync(url, 'utf8'))) return `${base}.url must hold one https URL`;
     return null;
   }
-  if (!fs.existsSync(twin)) return `${base}: no text twin (${base}.txt from pdftotext -layout) and no public ${base}.url`;
-  const p = pushedProblem(twin); if (p) return `text twin: ${p}`;
+  if (!fs.existsSync(twin) && !isLink(twin)) return `${base}: no text twin (${base}.txt from pdftotext -layout) and no public ${base}.url`;
+  const p = realProblem(twin) || pushedProblem(twin); if (p) return `text twin: ${p}`;
   let fresh;
   try { fresh = run('pdftotext', ['-layout', file, '-']); } catch { return `${base}: pdftotext could not read it`; }
   const saved = fs.readFileSync(twin);
@@ -63,7 +76,8 @@ function checkSources(files) {
   const refused = [];
   for (const f0 of files) {
     const file = path.resolve(f0); const name = path.basename(file); const ext = path.extname(file).toLowerCase();
-    let why;
+    let why = realProblem(file);
+    if (why) { refused.push({ name, reason: why }); continue; }
     if (TEXT_EXT.has(ext)) why = pushedProblem(file);
     else if (ext === '.pdf') why = pushedProblem(file) || pdfProblem(file);
     else if (IMAGE_EXT.has(ext)) {

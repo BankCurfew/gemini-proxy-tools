@@ -62,7 +62,7 @@ node scripts/poster.js generate "ประกันชีวิต CI" --type pr
 ### ChatGPT Projects (T4249, `project-files` / `project-instructions` / `new-chat --project`)
 
 - **What may go in**: project sources upload to OpenAI and stay there. Brand, style or reference material only: **no customer data, no ψ/ files** (security C1 on gemini-proxy-tools#68).
-- **Source gate** (`scripts/project-source-gate.js`, runs before any upload, one refused file = nothing uploaded). Every source must be tracked, unchanged since its last commit, and pushed, because the pre-push secret/PII scan reads only pushed text and skips binaries:
+- **Source gate** (`scripts/project-source-gate.js`, runs before any upload, one refused file = nothing uploaded). Every source (and its twin or .url) must be its own real file (no symlink anywhere in the path, nothing under `ψ/`), tracked, unchanged since its last commit, and pushed, because the pre-push secret/PII scan reads only pushed text and skips binaries:
   - **md / txt**: pushed.
   - **PDF**: pushed, plus ONE of: a **text twin** `X.pdf.txt` made with `pdftotext -layout X.pdf X.pdf.txt` and pushed with it (it must equal a fresh extraction and hold ≥ 100 non-space characters per page; less = an image-only PDF, refused) · or a **public source** `X.pdf.url` holding one https URL (e.g. the aia.co.th brochure page), pushed.
   - **Images** (png/jpg/jpeg/webp/gif): pushed, and only from a brand-asset folder named `project-sources` or `*-project-sources` (e.g. `Designer-Oracle/output/t4249/acep-project-sources/`).
@@ -207,7 +207,7 @@ This SOP v3.0 **supersedes** the following. Do NOT follow them for poster genera
 
 | Version | Date | Author | Change |
 |---------|------|--------|--------|
-| 3.3 | 2026-11-15 | Dev (T4249, security F2) | Project source gate replaces the interim md/txt-only line: PDF via text twin or public .url, images from a *-project-sources folder, other binaries refused |
+| 3.3 | 2026-11-15 | Dev (T4249, security F2) | Project source gate replaces the interim md/txt-only line: PDF via text twin or public .url, images from a *-project-sources folder, other binaries refused; no symlinks, nothing under ψ/ (security S1/S2) |
 | 3.2 | 2026-11-15 | Dev (T4249, security C1) | ChatGPT Projects section: sources go to OpenAI, brand/style/reference only, no customer data or ψ/ files, md/txt sources from a pushed commit, no PDF/binary until the F2 source gate; add/remove wording = pre-check all-or-nothing, mid-run failures reported by name (DocCon F1-F3) |
 | 3.1 | 2026-10-14 | Admin (bob T3030) | Gemini dropped (แบงค์): poster.js/`/poster` only; MQTT gemini-gen/chatgpt-gen marked history (extension stalls, background.js:165) |
 | 3.0 | 2026-07-05 | DocCon | Unified SOP: CDP primary, MQTT fallback, recovery specs |

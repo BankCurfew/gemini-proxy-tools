@@ -58,6 +58,20 @@ const scan = w('pack/scan.pdf', pdf([])); twin('pack/scan.pdf');
 const stale = w('pack/stale.pdf', pdf(TEXT)); twin('pack/stale.pdf');
 const httpUrl = w('pack/http.pdf', pdf([])); w('pack/http.pdf.url', 'http://example.com/x.pdf\n');
 const changed = w('pack/changed.md', 'v1\n');
+// S1 (security probe): tracked + pushed symlinks whose target is an untracked file OUTSIDE the repo
+const outside = path.join(root, 'outside'); fs.mkdirSync(outside);
+fs.writeFileSync(path.join(outside, 'secret.md'), 'untracked, never scanned\n');
+fs.writeFileSync(path.join(outside, 'secret.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+const lnk = (rel, target) => { const f = path.join(repo, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.symlinkSync(target, f); return f; };
+const linkMd = lnk('pack/link.md', path.join(outside, 'secret.md'));
+const linkPng = lnk('output/t1/x-project-sources/link.png', path.join(outside, 'secret.png'));
+const linkTwinPdf = w('pack/linktwin.pdf', pdf(TEXT));
+execFileSync('pdftotext', ['-layout', linkTwinPdf, path.join(outside, 'linktwin.pdf.txt')]);
+lnk('pack/linktwin.pdf.txt', path.join(outside, 'linktwin.pdf.txt'));
+fs.writeFileSync(path.join(outside, 'linkurl.pdf.url'), 'https://www.aia.co.th/x.pdf\n');
+const linkUrlPdf = w('pack/linkurl.pdf', pdf([])); lnk('pack/linkurl.pdf.url', path.join(outside, 'linkurl.pdf.url'));
+// S2: ψ/ is pushed in oracle repos, but C1 says no ψ/ files as sources
+const psi = w('ψ/memory/note.md', 'oracle brain note\n');
 commit('pushed state'); push();
 // after the push
 w('pack/stale.pdf', pdf(TEXT.concat(['one more line added after the twin was made'])));
@@ -85,6 +99,11 @@ noCase('pdf image-only (floor)', scan, /chars per page/);
 noCase('pdf .url not https', httpUrl, /https/);
 noCase('jpg outside a project-sources folder', badJpg, /project-sources/);
 noCase('docx', docx, /export it to md/);
+noCase('S1 tracked symlink .md → untracked file outside the repo', linkMd, /symlink/);
+noCase('S1 symlink .png in a *-project-sources folder', linkPng, /symlink/);
+noCase('S1 pdf whose text twin is a symlink', linkTwinPdf, /symlink/);
+noCase('S1 pdf whose .url is a symlink', linkUrlPdf, /symlink/);
+noCase('S2 pushed file under ψ/', psi, /ψ/);
 const all = checkSources([okMd, okPdf, badJpg]);
 check(!all.ok && all.refused.length === 1 && all.refused[0].name === '01.jpg', 'REFUSE one bad file refuses the call, names only it', JSON.stringify(all.refused.map((x) => x.name)));
 const fresh = execFileSync('pdftotext', ['-layout', okPdf, '-']);
