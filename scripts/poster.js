@@ -7,7 +7,7 @@
 // Task: gemini-proxy-tools#13
 
 const puppeteer = require('puppeteer-core');
-const { execSync, execFileSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { POSTER_IMG_SELECTOR, posterImageKeys, newestUnseen } = require('./poster-image-matcher');
@@ -520,15 +520,12 @@ async function verifyImageGeneration(page, baselineKeys) {
 function resizeToIG(filePath) {
   if (!filePath || !fs.existsSync(filePath)) return filePath;
 
-  const { execSync } = require('child_process');
   const outPath = filePath.replace(/\.png$/, '-1080x1920.png');
 
   try {
     // Scale to fit within 1080x1920 maintaining aspect ratio, then pad with brand BG color
-    execSync(
-      `convert "${filePath}" -resize 1080x1920 -gravity center -background "#FFFFFF" -extent 1080x1920 "${outPath}"`,
-      { timeout: 15000 }
-    );
+    // argv, no shell: the name carries the `generate <type>` prefix (security CHANGE on #69, T4249)
+    execFileSync('convert', [filePath, '-resize', '1080x1920', '-gravity', 'center', '-background', '#FFFFFF', '-extent', '1080x1920', outPath], { timeout: 15000 });
 
     if (fs.existsSync(outPath)) {
       const size = Math.round(fs.statSync(outPath).size / 1024);
@@ -2044,4 +2041,4 @@ if (require.main === module) main()
     if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(EXIT_TAB_BUSY); }
     console.error('ERROR:', e.message); process.exit(1);
   });   // T2790: requirable by test/t2790-stalled-send.test.js
-module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles, heartbeat, serverLanded, sessionGateVerdict, brandEntryAfterNewChat, newChatStartUrl, browserPath, qaGate };   // T3014: attachFiles for test/t3014-attach-wait
+module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles, heartbeat, serverLanded, sessionGateVerdict, brandEntryAfterNewChat, newChatStartUrl, browserPath, qaGate, resizeToIG };   // T3014: attachFiles for test/t3014-attach-wait
