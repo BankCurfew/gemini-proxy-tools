@@ -248,7 +248,119 @@ async function setInstructions(page, gid, text) {
   } finally { page.off('response', onRes); }
 }
 
+// ── commands (poster.js dispatches here; each returns the exit code: 0 ok, 1 refused / not proven) ──
+
+const CAP = 25;   // bob addendum 15 Nov: refuse past 25 even if the server's own limit says more
+const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round((n || 0) / 1024))} KB`);
+const refuse = (msg) => { console.error(`🚫 ${msg}`); return 1; };
+
+async function projectFilesCmd(page, a, { browserPath, dryRun }) {
+  if (!['add', 'list', 'remove'].includes(a.sub)) return refuse('usage: project-files add|list|remove --project <name|g-p-id> <files…>');
+  const p = await resolveProject(page, a.project);
+  const cur = await readProject(page, p.id);
+  const max = Math.min(cur.max, CAP);
+  if (a.sub === 'list') {
+    for (const f of cur.files) console.log(`${f.name}\t${fmtSize(f.size)}`);
+    console.log(`[project-files] ${cur.files.length}/${max} files in "${cur.name}" ${p.id}`);
+    return 0;
+  }
+  if (a.sub === 'add') {
+    const plan = planAdd(cur.files.map((f) => f.name), max, a.rest);
+    if (!plan.ok) return refuse(`[project-files] nothing uploaded: ${plan.reason}`);
+    console.log(`[project-files] "${cur.name}" ${p.id}: ${cur.files.length} + ${a.rest.length} → ${cur.files.length + a.rest.length}/${max}, ${plan.batches.length} batch(es) of ≤${MAX_PER_UPLOAD}`);
+    if (dryRun) { plan.batches.forEach((b, i) => console.log(`  batch ${i + 1}: ${b.map((f) => path.basename(f)).join(', ')}`)); return 0; }
+    const r = await addFiles(page, p.id, plan.batches, browserPath);
+    const after = new Set((await readProject(page, p.id)).files.map((f) => f.name));
+    const missing = r.added.filter((n) => !after.has(n));   // the response said 200 but the project does not list it
+    console.log(`[project-files] added ${r.added.length}/${a.rest.length} · project now lists ${after.size}`);
+    if (missing.length) return refuse(`[project-files] answered 200 but not in the project list: ${missing.join(', ')}`);
+    if (r.refused.length) return refuse(`[project-files] refused: ${r.refused.join(' · ')}`);
+    return 0;
+  }
+  const plan = planRemove(cur.files, a.rest);
+  if (!plan.ok) return refuse(`[project-files] nothing removed: ${plan.reason}`);
+  if (dryRun) { console.log(`[project-files] would remove from "${cur.name}": ${plan.targets.map((t) => t.name).join(', ')}`); return 0; }
+  const r = await removeFiles(page, p.id, plan.targets);
+  const after = new Set((await readProject(page, p.id)).files.map((f) => f.file_id));
+  const still = plan.targets.filter((t) => after.has(t.file_id)).map((t) => t.name);
+  console.log(`[project-files] removed ${r.removed.length}/${plan.targets.length} · project now lists ${after.size}`);
+  if (still.length) return refuse(`[project-files] still in the project after remove: ${still.join(', ')}`);
+  if (r.failed.length) return refuse(`[project-files] not removed: ${r.failed.join(' · ')}`);
+  return 0;
+}
+
+async function projectInstructionsCmd(page, a, { dryRun }) {
+  if (!['get', 'set'].includes(a.sub)) return refuse('usage: project-instructions get|set --project <name|g-p-id> [file]');
+  const p = await resolveProject(page, a.project);
+  const cur = await readProject(page, p.id);
+  const file = a.rest[0];
+  if (a.sub === 'get') {
+    if (!file) { process.stdout.write(cur.instructions); if (!cur.instructions.endsWith('\n')) process.stdout.write('\n'); return 0; }
+    fs.writeFileSync(file, cur.instructions, 'utf-8');
+    console.log(`[project-instructions] "${cur.name}" ${p.id}: wrote ${Buffer.byteLength(cur.instructions)} bytes to ${file}`);
+    return 0;
+  }
+  if (!file) return refuse('project-instructions set needs a file');
+  let want;
+  try { want = fs.readFileSync(file, 'utf-8'); } catch (e) { return refuse(`cannot read ${file}: ${e.message}`); }
+  if (!want.trim()) return refuse(`${file} is empty: refusing to blank the project instructions`);
+  if (cur.instructions === want) { console.log(`[project-instructions] "${cur.name}" already holds these ${Buffer.byteLength(want)} bytes: unchanged`); return 0; }
+  if (dryRun) { console.log(`[project-instructions] would set "${cur.name}" ${p.id}: ${Buffer.byteLength(cur.instructions)} → ${Buffer.byteLength(want)} bytes`); return 0; }
+  await setInstructions(page, p.id, want);
+  const got = (await readProject(page, p.id)).instructions;
+  if (got !== want) return refuse(`[project-instructions] read back ${Buffer.byteLength(got)} bytes ≠ file ${Buffer.byteLength(want)} bytes (first diff at char ${[...want].findIndex((c, i) => c !== got[i])})`);
+  console.log(`[project-instructions] "${cur.name}" ${p.id}: set, read back byte-equal (${Buffer.byteLength(want)} bytes)`);
+  return 0;
+}
+
+/**
+ * A chat that opens INSIDE the project (so it starts with the project's sources + instructions), titled, URL printed.
+ * Writes nothing to poster.config.json: a brand chat is still `new-chat --brand`. Success = the server has the chat with
+ * gizmo_id = this project, a finished reply to the seed, and the title read back.
+ */
+async function newProjectChat(page, a, { sendAndConfirm }) {
+  if (!a.title || !a.title.trim()) return refuse('new-chat --project needs --title <t>');
+  const p = await resolveProject(page, a.project);
+  await gotoProject(page, p.id);
+  const seed = 'Reply only: "Ready."';
+  if (!(await sendAndConfirm(page, seed, { label: 'new-chat', timeoutMs: 45000 }))) return refuse('[new-chat] seed did not land (see line above)');
+  let chatId = null;
+  for (let i = 0; i < 45 && !chatId; i++) {
+    await sleep(1000);
+    const m = page.url().match(/\/c\/([0-9a-f-]{36})/);
+    if (m) chatId = m[1];
+  }
+  if (!chatId) return refuse(`[new-chat] no chat id in the URL after 45 s (${page.url().slice(0, 100)})`);
+  const r = await page.evaluate(async ([id, title]) => {
+    try {
+      const s = await (await fetch('/api/auth/session')).json();
+      const H = { Authorization: 'Bearer ' + s.accessToken, 'Content-Type': 'application/json' };
+      const get = async () => { const g = await fetch('/backend-api/conversation/' + id, { headers: H }); return g.ok ? g.json() : { status: g.status }; };
+      let j = null; let done = false;
+      for (let i = 0; i < 30 && !done; i++) {
+        j = await get();
+        done = Object.values(j.mapping || {}).some((n) => n.message && n.message.author.role === 'assistant' && n.message.status === 'finished_successfully');
+        if (done) break;
+        await new Promise((ok) => setTimeout(ok, 1000));
+      }
+      const pr = await fetch('/backend-api/conversation/' + id, { method: 'PATCH', headers: H, body: JSON.stringify({ title }) });
+      await new Promise((ok) => setTimeout(ok, 1500));
+      const after = await get();
+      return { done, gizmo_id: j.gizmo_id || null, temporary: !!j.is_temporary_chat, patch: pr.status, title: after.title };
+    } catch (e) { return { error: e.message }; }
+  }, [chatId, a.title.trim()]);
+  if (r.error) return refuse(`[new-chat] ${r.error}`);
+  if (!r.done) return refuse(`[new-chat] chat ${chatId}: no finished reply to the seed on the server after 30 s`);
+  if (r.temporary) return refuse(`[new-chat] ${chatId} is a temporary chat`);
+  if (r.gizmo_id !== p.id) return refuse(`[new-chat] chat ${chatId} is in ${r.gizmo_id || 'no project'}, not "${p.name}" ${p.id}`);
+  if (r.title !== a.title.trim()) return refuse(`[new-chat] title read back "${r.title}" ≠ "${a.title.trim()}" (PATCH ${r.patch})`);
+  console.log(`[new-chat] "${r.title}" in "${p.name}" ${p.id} (server: gizmo_id matches, seed reply finished)`);
+  console.log(`https://chatgpt.com/g/${p.id}/c/${chatId}`);
+  return 0;
+}
+
 module.exports = {
-  GID_RE, MAX_PER_UPLOAD, parseArgs, matchProject, planAdd, planRemove,
+  GID_RE, MAX_PER_UPLOAD, CAP, parseArgs, matchProject, planAdd, planRemove,
   listProjects, resolveProject, readProject, addFiles, removeFiles, setInstructions, gotoProject,
+  projectFilesCmd, projectInstructionsCmd, newProjectChat,
 };

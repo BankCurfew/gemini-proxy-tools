@@ -73,7 +73,8 @@ function getActiveBrandChatId() {
 }
 
 // Commands that don't need --brand
-const BRAND_EXEMPT_CMDS = new Set(['help', 'resolve', 'status', 'st', 'images', 'imgs']);
+// T4249: the project commands name a ChatGPT Project (--project), not a brand chat
+const BRAND_EXEMPT_CMDS = new Set(['help', 'resolve', 'status', 'st', 'images', 'imgs', 'project-files', 'project-instructions']);
 const currentCmd = process.argv[2];
 let BRAND_CHAT_URL;
 if (BRAND_EXEMPT_CMDS.has(currentCmd) || !currentCmd) {
@@ -263,6 +264,7 @@ function shortUrl(u) { try { const x = new URL(u); return x.origin === 'null' ? 
 
 // T2753: per-call bound on the chat tab (TAB BUSY windows, never re-issue a call) — scripts/tab-guard.js
 const { TabBusyError, guardTab: guardTabWith } = require('./tab-guard');
+const projects = require('./poster-projects');   // T4249
 const EXIT_TAB_BUSY = 75;   // T2753: exit codes — 1 error · 2 refused · 3 wrong image · 4 T599 brand ABORT · 75 TAB BUSY (retry)
 const guardTab = (page) => guardTabWith(page, { windowMs: cfg.tab_call_timeout_ms, windows: cfg.tab_busy_windows });
 
@@ -1792,8 +1794,9 @@ async function newChat(page, rawBrandName) {
 function stripFlags(argv) {
   const out = [];
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--brand' || argv[i] === '--force' || argv[i] === '--dry-run') {
-      if (argv[i] === '--brand') i++; // skip the value too
+    if (argv[i].startsWith('--project=') || argv[i].startsWith('--title=')) continue;   // T4249: read by poster-projects parseArgs
+    if (argv[i] === '--brand' || argv[i] === '--force' || argv[i] === '--dry-run' || argv[i] === '--project' || argv[i] === '--title') {
+      if (argv[i] !== '--force' && argv[i] !== '--dry-run') i++; // skip the value too
       continue;
     }
     out.push(argv[i]);
@@ -1825,6 +1828,13 @@ Commands:
   status              Check ChatGPT tab status + image count
   generate <type> <brief>  Generate poster (--brand required)
   new-chat --brand <name>  Create new ChatGPT chat for brand + save chat_id
+  new-chat --project <name|g-p-id> --title <t>  Open a titled chat INSIDE a Project (starts with its sources +
+                      instructions), print its URL; poster.config.json is not changed
+  project-files list|add|remove --project <name|g-p-id> [files…]  Project Sources: list = name + size ·
+                      add uploads through the Sources UI (≤10 per batch, refuses past 25 or a name already there,
+                      all-or-nothing) · remove by file name · each change read back from the server
+  project-instructions get|set --project <name|g-p-id> [file]  get = print (or write to file) · set = Project
+                      settings → Save, read back byte-equal
   rename --brand <name>    Set that chat's ChatGPT title to brands.<name>.title (API only, no navigation)
   prompt <text>       Send raw prompt to ChatGPT (--brand required)
   wait [taskId]       Wait for current generation (with heartbeat)
@@ -1851,7 +1861,8 @@ Safeguards:
 Pipeline: T6 rotate (≥${cfg.max_chat_images} imgs) → generate → T9 verify (DOM adjacency)
           → download (3 fallbacks) → T8 QA gate (size check) → done
 Recovery: T1 stall (${cfg.stall_threshold_polls} flat → reload, stable baseline) | T2 refusal → reframe
-Exit codes: 0=ok, 2=refused, 3=T9 wrong-image, 4=blocked/warning
+Exit codes: 0=ok, 1=project command refused / not proven, 2=refused, 3=T9 wrong-image, 4=blocked/warning, 75=TAB BUSY
+Project name → id fails closed on 0 or 2+ matches (pass the g-p id then)
 Config: ${CONFIG_PATH}
 
 Examples:
@@ -1915,10 +1926,17 @@ Examples:
   // T2775: rename is API-only, so it also runs in whatever ChatGPT tab is open (never navigates it)
   // T2801: a render stalls Chrome's CDP attach, so wait for it BEFORE connecting (every command, said out loud), and a
   // connect that still gets no answer ends as TAB BUSY (exit 75) instead of hanging with no output
+  // T4249: project commands parse their own flags from the raw argv (and refuse a bad one before any browser work)
+  const PROJECT_CMDS = new Set(['project-files', 'project-instructions']);
+  let projArgs = null;
+  if (PROJECT_CMDS.has(cmd) || (cmd === 'new-chat' && process.argv.some((x) => x === '--project' || x.startsWith('--project=')))) {
+    try { projArgs = projects.parseArgs(process.argv.slice(2)); } catch (e) { console.error(`🚫 ${e.message}`); process.exitCode = 1; return; }
+    if (cmd === 'new-chat' && BRAND_FLAG) { console.error('🚫 new-chat takes --brand OR --project, not both'); process.exitCode = 1; return; }
+  }
   let browser, page;
   try {
     await waitRenderIdle('connect');
-    ({ browser, page } = (cmd === 'new-chat' || cmd === 'rename') ? await connectAnyChatgptTab() : await connect());
+    ({ browser, page } = (cmd === 'new-chat' || cmd === 'rename' || projArgs) ? await connectAnyChatgptTab() : await connect());
   } catch (e) {
     if (e instanceof TabBusyError) { console.error('⏳', e.message); process.exit(EXIT_TAB_BUSY); }
     throw e;
@@ -1986,7 +2004,14 @@ Examples:
       case 'rename':
         await renameChat(page, BRAND_FLAG);
         break;
+      case 'project-files':
+        process.exitCode = await projects.projectFilesCmd(page, projArgs, { browserPath, dryRun: DRY_RUN });
+        break;
+      case 'project-instructions':
+        process.exitCode = await projects.projectInstructionsCmd(page, projArgs, { dryRun: DRY_RUN });
+        break;
       case 'new-chat': {
+        if (projArgs) { process.exitCode = await projects.newProjectChat(page, projArgs, { sendAndConfirm }); break; }
         const brandName = BRAND_FLAG || args[0];
         if (!brandName) {
           console.error('Usage: poster.js new-chat --brand <name>');
