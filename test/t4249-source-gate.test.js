@@ -63,9 +63,9 @@ const scan = w('pack/scan.pdf', pdf([])); twin('pack/scan.pdf');
 const stale = w('pack/stale.pdf', pdf(TEXT)); twin('pack/stale.pdf');
 const httpUrl = w('pack/http.pdf', pdf([])); w('pack/http.pdf.url', 'http://example.com/x.pdf\n');
 const changed = w('pack/changed.md', 'v1\n');
-// DocCon F1: the floor is per page. 1 text page + 1 image-only page (avg 300+/2 > 100) must be refused.
-const mixed = w('pack/mixed.pdf', pdf([TEXT, []])); twin('pack/mixed.pdf');
-const twoText = w('pack/two-text.pdf', pdf([TEXT, TEXT])); twin('pack/two-text.pdf');
+// DocCon F1 / security F3: the floor is per page. 1 dense + 2 image-only pages (total over 3 x 100) must be refused.
+const mixed = w('pack/mixed.pdf', pdf([TEXT, [], []])); twin('pack/mixed.pdf');
+const threeText = w('pack/three-text.pdf', pdf([TEXT, TEXT, TEXT])); twin('pack/three-text.pdf');
 // S1 (security probe): tracked + pushed symlinks whose target is an untracked file OUTSIDE the repo
 const outside = path.join(root, 'outside'); fs.mkdirSync(outside);
 fs.writeFileSync(path.join(outside, 'secret.md'), 'untracked, never scanned\n');
@@ -103,9 +103,11 @@ noCase('md committed, not pushed', local, /not pushed/);
 noCase('md changed after push', changed, /changed since/);
 noCase('pdf without twin or .url', noTwin, /no text twin/);
 noCase('pdf twin stale', stale, /twin .*does not match/);
-noCase('pdf image-only (floor)', scan, /under 100 chars/);
-noCase('pdf 1 text page + 1 image-only page (per-page floor, not average)', mixed, /page 2/);
-okCase('pdf 2 text pages + twin pushed', twoText);
+noCase('pdf image-only (floor)', scan, /page 1 image-only/);
+noCase('pdf 1 dense + 2 image-only pages, total over the floor (per page, names the pages)', mixed, /pages 2, 3 image-only/);
+okCase('pdf 3 text pages + twin pushed', threeText);
+const mixedChars = fs.readFileSync(mixed + '.txt', 'utf8').replace(/\s/g, '').length;
+check(mixedChars >= 300, 'control: the mixed PDF total is over 3 pages x 100 (an average check would pass it)', `${mixedChars} chars`);
 noCase('pdf .url not https', httpUrl, /https/);
 noCase('jpg outside a project-sources folder', badJpg, /project-sources/);
 noCase('docx', docx, /export it to md/);

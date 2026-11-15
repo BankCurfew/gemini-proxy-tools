@@ -67,11 +67,12 @@ function pdfProblem(file) {
   try { pages = Number((run('pdfinfo', [file]).toString().match(/^Pages:\s+(\d+)/m) || [])[1]); } catch { pages = NaN; }
   if (!(pages > 0)) return `${base}: pdfinfo could not count the pages`;
   // EVERY page, not the average (DocCon F1 on #70): pdftotext ends each page with \f, so one text page cannot carry
-  // image-only pages the scanner never reads. A page missing from the twin counts as 0.
-  const perPage = saved.toString('utf8').split('\f');
+  // image-only pages the scanner never reads. Fewer segments than pages = refused.
+  const perPage = fresh.toString('utf8').split('\f');   // fresh = twin (sha checked above); pdfinfo Pages segments
+  if (perPage.length < pages) return `${base}: pdftotext gave ${perPage.length} page segment(s) for ${pages} page(s): can't prove every page has text`;
   const thin = [];
-  for (let i = 0; i < pages; i++) { const n = (perPage[i] || '').replace(/\s/g, '').length; if (n < MIN_CHARS_PER_PAGE) thin.push(`page ${i + 1}: ${n}`); }
-  if (thin.length) return `${base}: ${thin.length} of ${pages} page(s) under ${MIN_CHARS_PER_PAGE} chars (${thin.slice(0, 5).join(', ')}${thin.length > 5 ? ' …' : ''}): image-only pages can't be scanned`;
+  for (let i = 0; i < pages; i++) if (perPage[i].replace(/\s/g, '').length < MIN_CHARS_PER_PAGE) thin.push(i + 1);
+  if (thin.length) return `${base}: page${thin.length > 1 ? 's' : ''} ${thin.join(', ')} image-only (under ${MIN_CHARS_PER_PAGE} chars of text, can't be scanned): remove ${thin.length > 1 ? 'them' : 'it'} from the PDF or use a public ${base}.url`;
   return null;
 }
 
