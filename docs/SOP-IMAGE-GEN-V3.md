@@ -1,6 +1,6 @@
-# SOP: Image Generation v3.0 — Unified Pipeline
+# SOP: Image Generation v3.2 — Unified Pipeline
 
-> **Version**: 3.0 | **Date**: 2026-07-05  
+> **Version**: 3.2 | **Date**: 2026-11-15  
 > **Owner**: DocCon-Oracle (canonical) · BotDev-Oracle (implementation)  
 > **Ref**: gemini-proxy-tools#13, BoB-Oracle#158  
 > **Status**: ACTIVE — supersedes all prior image-gen SOPs  
@@ -58,6 +58,12 @@
 # Direct node (when skill unavailable)
 node scripts/poster.js generate "ประกันชีวิต CI" --type promo --badge "สาระประกัน"
 ```
+
+### ChatGPT Projects (T4249, `project-files` / `project-instructions` / `new-chat --project`)
+
+- **What may go in**: project sources upload to OpenAI and stay there. Brand, style or reference material only: **no customer data, no ψ/ files** (security C1 on gemini-proxy-tools#68).
+- **Sources = md/txt only**, from a pushed commit, so the pre-push secret/PII scan has run on them. **No PDF and no other binary** (images, docx, xlsx …) until the source gate ships: the scan skips binary files, so their content is never checked (security F2 on #69).
+- Runs in the poster's own L4 slot window, never แบงค์'s tabs. Name → project id fails closed on 0 or 2+ matches; every file is checked before the first upload (one bad file = nothing sent); a failure mid-run is reported by name and the files already done stay; each change is read back from the server.
 
 ### Config (poster.config.json — after T4 de-hardcode)
 
@@ -197,6 +203,7 @@ This SOP v3.0 **supersedes** the following. Do NOT follow them for poster genera
 
 | Version | Date | Author | Change |
 |---------|------|--------|--------|
+| 3.2 | 2026-11-15 | Dev (T4249, security C1) | ChatGPT Projects section: sources go to OpenAI, brand/style/reference only, no customer data or ψ/ files, md/txt sources from a pushed commit, no PDF/binary until the F2 source gate; add/remove wording = pre-check all-or-nothing, mid-run failures reported by name (DocCon F1-F3) |
 | 3.1 | 2026-10-14 | Admin (bob T3030) | Gemini dropped (แบงค์): poster.js/`/poster` only; MQTT gemini-gen/chatgpt-gen marked history (extension stalls, background.js:165) |
 | 3.0 | 2026-07-05 | DocCon | Unified SOP: CDP primary, MQTT fallback, recovery specs |
 | 2.x | 2026-06 | Various | Multiple conflicting SOPs across repos |
