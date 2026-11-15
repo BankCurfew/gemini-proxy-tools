@@ -336,11 +336,11 @@ async function projectFilesCmd(page, a, { browserPath, dryRun, sourceGate = chec
   return 0;
 }
 
-async function projectInstructionsCmd(page, a, { dryRun }) {
+async function projectInstructionsCmd(page, a, { dryRun, sourceGate = checkSources }) {   // sourceGate: as projectFilesCmd (tests stub it)
   if (!['get', 'set'].includes(a.sub)) return refuse('usage: project-instructions get|set --project <name|g-p-id> [file]');
   if (a.sub === 'set') {   // gate before the browser (security C1 on #73)
     if (!a.rest[0]) return refuse('project-instructions set needs a file');
-    const g = instructionsGate(a.rest[0]); if (g) return refuse(g);
+    const g = instructionsGate(a.rest[0], sourceGate); if (g) return refuse(g);
   }
   const p = await resolveProject(page, a.project);
   const cur = await readProject(page, p.id);
@@ -416,9 +416,9 @@ const readConfig = (file) => JSON.parse(fs.readFileSync(file, 'utf-8'));
 
 /** An instructions file goes to OpenAI like a project source (security C1 on #73): md/txt only, then the same F2 gate
  *  (tracked, pushed, unchanged, no symlink, nothing under ψ/). Refusal text with a fix line, or null. No browser. */
-function instructionsGate(file) {
+function instructionsGate(file, sourceGate = checkSources) {
   if (!/\.(md|txt)$/i.test(file || '')) return `instructions file ${file}: only .md or .txt` + fix('export the instructions to a .md file in a brand repo, commit and push it');
-  const g = checkSources([file]);
+  const g = sourceGate([file]);
   if (!g.ok) return `instructions file refused: ${g.refused.map((r) => r.reason).join('; ')}` + fix('commit + push the .md in a brand repo (not ψ/, not a symlink), then re-run');
   return null;
 }

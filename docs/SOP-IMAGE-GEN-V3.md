@@ -73,6 +73,7 @@ node scripts/poster.js generate "ประกันชีวิต CI" --type pr
 
 - `node poster.js create-project --name "<name>" [--instructions-file <md>] [--dry-run]`: sidebar "Add new project" → name → Create. Idempotent by exact name (exists = nothing created); 2+ projects with that name = refused. Writes `projects.<name> = g-p-…` and prints the id. With `--instructions-file` it sets the instructions and reads them back.
 - `node poster.js move-chat --brand <brand> --project "<name>" [--dry-run]`: chat title menu (header) → "Move to project" → the project. Done only when the server says the chat's project = that id **and** the project's chat list holds it; then writes `brands.<brand>.project`. Already there = nothing moved. A busy chat = exit 75 (retry later).
+- **Instructions files go to OpenAI like a source** (security C1 on #73): `--instructions-file` and `project-instructions set` take only a `.md`/`.txt` that passes the source gate above (tracked, pushed, unchanged, no symlink, nothing under `ψ/`), checked before the browser.
 - Both refuse before any browser work on an unknown brand/project or a missing `--name` (config md5 unchanged). They run in the slot window with a desktop-size viewport set on the tab only (the narrow slot window hides the sidebar); the window itself is never resized.
 
 ### Config (poster.config.json — after T4 de-hardcode)
