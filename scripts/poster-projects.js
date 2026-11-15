@@ -515,13 +515,20 @@ async function createProjectCmd(page, a, { configPath, dryRun }) {
   return 0;
 }
 
-/** { gizmo_id, title, busy } of a chat from the server; busy = the newest assistant message is not finished. */
+/** Busy = the newest assistant reply is in_progress AND younger than BUSY_STALE_MIN. An older one is a stale status
+ *  (a turn that never finished: dreambank-carousel 15 Nov, 19144 min) and would block move-chat forever. */
+const BUSY_STALE_MIN = 30;
+function chatBusy(mapping, nowSec = Date.now() / 1000) {
+  const msgs = Object.values(mapping || {}).map((n) => n && n.message).filter((m) => m && m.author && m.author.role === 'assistant');
+  const last = msgs.sort((x, y) => (x.create_time || 0) - (y.create_time || 0)).pop();
+  return !!last && last.status === 'in_progress' && nowSec - (last.create_time || 0) < BUSY_STALE_MIN * 60;
+}
+
+/** { gizmo_id, title, busy } of a chat from the server (busy: chatBusy). */
 async function readChat(page, chatId) {
   const r = await api(page, 'GET', `/backend-api/conversation/${chatId}`);
   if (r.status !== 200 || !r.json) throw new Error(`chat ${chatId}: HTTP ${r.status}${r.error ? ` ${r.error}` : ''}` + fix('open the chat in the browser; deleted or another account?'));
-  const msgs = Object.values(r.json.mapping || {}).map((n) => n.message).filter((m) => m && m.author && m.author.role === 'assistant');
-  const last = msgs.sort((x, y) => (x.create_time || 0) - (y.create_time || 0)).pop();
-  return { gizmo_id: r.json.gizmo_id || null, title: r.json.title || '', busy: !!last && last.status === 'in_progress' };
+  return { gizmo_id: r.json.gizmo_id || null, title: r.json.title || '', busy: chatBusy(r.json.mapping) };
 }
 
 /** Does the project's own chat list (sidebar, conversations per project) hold this chat? Walks the cursor like the UI. */
@@ -574,7 +581,7 @@ async function moveChatCmd(page, a, { brand, configPath, dryRun }) {
   let chat = await readChat(page, pre.chatId);
   const before = chat.gizmo_id;
   if (chat.gizmo_id !== pre.gid) {
-    if (chat.busy) return EXIT_TAB_BUSY;
+    if (chat.busy) { console.error(`TAB BUSY: chat ${pre.chatId} is generating a reply (newest reply in_progress, under ${BUSY_STALE_MIN} min): nothing moved, retry later`); return EXIT_TAB_BUSY; }
     if (dryRun) { console.log(`[move-chat] would move ${brand} ${pre.chatId} "${chat.title}" from ${before || 'no project'} → "${name}" ${pre.gid}`); return 0; }
     await moveChatUI(page, pre.chatId, live.name);
     for (let i = 0; i < 8 && chat.gizmo_id !== pre.gid; i++) { await sleep(2000); chat = await readChat(page, pre.chatId); }
@@ -591,7 +598,7 @@ async function moveChatCmd(page, a, { brand, configPath, dryRun }) {
 const EXIT_TAB_BUSY = 75;
 
 module.exports = {
-  precheck, instructionsGate, createProjectCmd, moveChatCmd, readChat,
+  precheck, instructionsGate, chatBusy, createProjectCmd, moveChatCmd, readChat,
   GID_RE, MAX_PER_UPLOAD, CAP, parseArgs, matchProject, planAdd, planRemove,
   configWithProject, configWithBrandProject, writeConfigAtomic,
   listProjects, resolveProject, readProject, addFiles, removeFiles, setInstructions, gotoProject,
