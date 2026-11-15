@@ -1833,8 +1833,9 @@ Commands:
                       stay) · remove by file name · each change read back from the server
                       ⚠️ sources upload to OpenAI and stay there: brand, style or reference material only, NO customer
                       data, NO ψ/ files · source gate: every file real (no symlink), not under ψ/, pushed + unchanged ·
-                      md/txt · PDF + pushed text twin X.pdf.txt (pdftotext -layout, ≥100 chars/page) or X.pdf.url
-                      (https) · images only from a *-project-sources/ folder · other types refused (export to md)
+                      md/txt · PDF + pushed text twin X.pdf.txt (pdftotext -layout, ≥100 chars on every page)
+                      or X.pdf.url (https) · images only from a *-project-sources/ folder · other types refused
+                      (export to md)
   project-instructions get|set --project <name|g-p-id> [file]  get = print (or write to file) · set = Project
                       settings → Save, read back byte-equal
   rename --brand <name>    Set that chat's ChatGPT title to brands.<name>.title (API only, no navigation)

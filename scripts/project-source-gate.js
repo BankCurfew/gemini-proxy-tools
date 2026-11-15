@@ -3,7 +3,7 @@
 // That scan reads text only (it skips binaries), so:
 //   md / txt  → tracked, unchanged since its last commit, and that commit is on a remote (pushed)
 //   pdf       → same, plus ONE of: a text twin `X.pdf.txt` (pushed, = fresh `pdftotext -layout X.pdf`, and
-//               ≥ 100 non-space chars per page: less = a scan whose text the scanner can't read) · or a public
+//               ≥ 100 non-space chars on EVERY page: less = a scanned page whose text the scanner can't read) · or a public
 //               source `X.pdf.url` (pushed, one https URL)
 //   png/jpg/jpeg/webp/gif → same, and only from a brand-asset folder named `project-sources` or `*-project-sources`
 //   anything else (docx, xlsx, zip …) → refused: export it to md
@@ -66,8 +66,12 @@ function pdfProblem(file) {
   let pages;
   try { pages = Number((run('pdfinfo', [file]).toString().match(/^Pages:\s+(\d+)/m) || [])[1]); } catch { pages = NaN; }
   if (!(pages > 0)) return `${base}: pdfinfo could not count the pages`;
-  const chars = saved.toString('utf8').replace(/\s/g, '').length;
-  if (chars < MIN_CHARS_PER_PAGE * pages) return `${base}: ${chars} chars over ${pages} page(s) < ${MIN_CHARS_PER_PAGE} chars per page (image-only PDF: its text can't be scanned)`;
+  // EVERY page, not the average (DocCon F1 on #70): pdftotext ends each page with \f, so one text page cannot carry
+  // image-only pages the scanner never reads. A page missing from the twin counts as 0.
+  const perPage = saved.toString('utf8').split('\f');
+  const thin = [];
+  for (let i = 0; i < pages; i++) { const n = (perPage[i] || '').replace(/\s/g, '').length; if (n < MIN_CHARS_PER_PAGE) thin.push(`page ${i + 1}: ${n}`); }
+  if (thin.length) return `${base}: ${thin.length} of ${pages} page(s) under ${MIN_CHARS_PER_PAGE} chars (${thin.slice(0, 5).join(', ')}${thin.length > 5 ? ' …' : ''}): image-only pages can't be scanned`;
   return null;
 }
 

@@ -15,17 +15,22 @@ const { checkSources } = require('../scripts/project-source-gate.js');
 
 const git = (cwd, ...a) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 
-// Minimal one-page PDF; `lines` = text lines drawn with Helvetica (none = a page with no text, like a scan).
+// Minimal PDF; `lines` = text lines drawn with Helvetica on one page (none = a page with no text, like a scan),
+// or an array of such arrays = one page each.
 function pdf(lines) {
+  const pages = Array.isArray(lines[0]) ? lines : [lines];
   const esc = (s) => s.replace(/[\\()]/g, (c) => '\\' + c);
-  const content = lines.length ? `BT /F1 10 Tf 12 TL 40 750 Td ${lines.map((l) => `(${esc(l)}) Tj T*`).join(' ')} ET` : '';
+  const stream = (ls) => { const c = ls.length ? `BT /F1 10 Tf 12 TL 40 750 Td ${ls.map((l) => `(${esc(l)}) Tj T*`).join(' ')} ET` : ''; return `<< /Length ${Buffer.byteLength(c)} >>\nstream\n${c}\nendstream`; };
+  const n = pages.length; const pageObj = (i) => 4 + i * 2; const contentObj = (i) => 5 + i * 2;
   const objs = [
     '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    `<< /Type /Pages /Kids [${pages.map((_, i) => `${pageObj(i)} 0 R`).join(' ')}] /Count ${n} >>`,
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
-    `<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`,
   ];
+  pages.forEach((ls, i) => {
+    objs.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentObj(i)} 0 R >>`);
+    objs.push(stream(ls));
+  });
   let out = '%PDF-1.4\n'; const off = [];
   objs.forEach((o, i) => { off.push(Buffer.byteLength(out)); out += `${i + 1} 0 obj\n${o}\nendobj\n`; });
   const x = Buffer.byteLength(out);
@@ -58,6 +63,9 @@ const scan = w('pack/scan.pdf', pdf([])); twin('pack/scan.pdf');
 const stale = w('pack/stale.pdf', pdf(TEXT)); twin('pack/stale.pdf');
 const httpUrl = w('pack/http.pdf', pdf([])); w('pack/http.pdf.url', 'http://example.com/x.pdf\n');
 const changed = w('pack/changed.md', 'v1\n');
+// DocCon F1: the floor is per page. 1 text page + 1 image-only page (avg 300+/2 > 100) must be refused.
+const mixed = w('pack/mixed.pdf', pdf([TEXT, []])); twin('pack/mixed.pdf');
+const twoText = w('pack/two-text.pdf', pdf([TEXT, TEXT])); twin('pack/two-text.pdf');
 // S1 (security probe): tracked + pushed symlinks whose target is an untracked file OUTSIDE the repo
 const outside = path.join(root, 'outside'); fs.mkdirSync(outside);
 fs.writeFileSync(path.join(outside, 'secret.md'), 'untracked, never scanned\n');
@@ -95,7 +103,9 @@ noCase('md committed, not pushed', local, /not pushed/);
 noCase('md changed after push', changed, /changed since/);
 noCase('pdf without twin or .url', noTwin, /no text twin/);
 noCase('pdf twin stale', stale, /twin .*does not match/);
-noCase('pdf image-only (floor)', scan, /chars per page/);
+noCase('pdf image-only (floor)', scan, /under 100 chars/);
+noCase('pdf 1 text page + 1 image-only page (per-page floor, not average)', mixed, /page 2/);
+okCase('pdf 2 text pages + twin pushed', twoText);
 noCase('pdf .url not https', httpUrl, /https/);
 noCase('jpg outside a project-sources folder', badJpg, /project-sources/);
 noCase('docx', docx, /export it to md/);
