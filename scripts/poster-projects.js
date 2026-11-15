@@ -431,14 +431,34 @@ function precheck(cmd, a, brand, configPath) {
   return null;
 }
 
-/** The sidebar "New project" → name → Create. Only the UI makes projects (no public API, researcher playbook @ed1a7fc). */
-async function createProjectUI(page, name) {
+/** Slot windows are narrow (~516 px): ChatGPT then hides the sidebar and its project controls. Emulate a desktop
+ *  viewport on this tab only for fn (the window itself is never resized, GR#5), cleared after. Probe T4279 15 Nov 21:3x. */
+async function withDesktopViewport(page, fn) {
+  const cdp = await page.createCDPSession();
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 900, deviceScaleFactor: 1, mobile: false });
+  try { return await fn(); } finally { await cdp.send('Emulation.clearDeviceMetricsOverride').catch(() => {}); await cdp.detach().catch(() => {}); }
+}
+
+/** The sidebar "Add new project" → name → Create. Only the UI makes projects (no public API, researcher playbook @ed1a7fc). */
+async function createProjectUI(page, name) { return withDesktopViewport(page, () => createProjectUIDesktop(page, name)); }
+async function createProjectUIDesktop(page, name) {
   await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await sleep(5000);
-  const btn = await page.evaluateHandle(() => [...document.querySelectorAll('nav button, nav a, nav [role="button"], aside button')]
-    .find((e) => /^(new project|โปรเจกต์ใหม่|สร้างโปรเจกต์)/i.test((e.getAttribute('aria-label') || e.textContent || '').trim())) || null);
-  if (!(await btn.evaluate((e) => !!e))) throw new Error('no "New project" control in the sidebar (English or Thai label)' + fix('open chatgpt.com in the slot window, check the sidebar shows Projects'));
-  await btn.click(); await sleep(1500);
+  const NEW_RE = /^(add new project|new project|โปรเจกต์ใหม่|สร้างโปรเจกต์)/i;
+  const findNew = () => page.evaluateHandle((re) => [...document.querySelectorAll('nav button, nav a, nav [role="button"], aside button')]
+    .find((e) => new RegExp(re, 'i').test((e.getAttribute('aria-label') || e.textContent || '').trim())) || null, NEW_RE.source);
+  let btn = null;
+  for (let i = 0; i < 15; i++) {   // the sidebar renders late; a collapsed one is opened once (state is per browser profile)
+    await sleep(1000);
+    btn = await findNew();
+    if (await btn.evaluate((e) => !!e)) break;
+    if (i === 5) await page.evaluate(() => { const o = [...document.querySelectorAll('button')].find((e) => /^open sidebar$/i.test(e.getAttribute('aria-label') || '')); if (o) o.click(); });
+  }
+  if (!(await btn.evaluate((e) => !!e))) {
+    const seen = await page.evaluate(() => [...document.querySelectorAll('nav button, aside button')].map((e) => (e.getAttribute('aria-label') || e.textContent || '').trim().slice(0, 30)).filter(Boolean).slice(0, 12).join(' | '));
+    throw new Error(`no "Add new project" control in the sidebar (English or Thai label); sidebar buttons seen: ${seen || 'none'}` + fix('open chatgpt.com in the slot window, check the sidebar shows Projects'));
+  }
+  // DOM click: a mouse click at the button's box opened nothing (the sidebar row is hover-revealed; probe 21:3x)
+  await btn.evaluate((e) => { e.scrollIntoView({ block: 'center' }); e.click(); }); await sleep(1500);
   const inp = await page.waitForSelector('[role="dialog"] input', { timeout: 10000 }).catch(() => null);
   if (!inp) throw new Error('"New project" opened no dialog with a name field' + fix('re-run; if it repeats, run Dev-Oracle output/t4279/probe-create-move.mjs'));
   await inp.type(name, { delay: 20 }); await sleep(500);
@@ -507,11 +527,17 @@ async function projectHasChat(page, gid, chatId) {
 }
 
 /** Chat options menu → "Move to project" → the project, by exact name (English or Thai labels; fail closed on neither). */
-async function moveChatUI(page, chatId, name) {
+async function moveChatUI(page, chatId, name) { return withDesktopViewport(page, () => moveChatUIDesktop(page, chatId, name)); }
+async function moveChatUIDesktop(page, chatId, name) {
+  const { title } = await readChat(page, chatId);
   await page.goto(`https://chatgpt.com/c/${chatId}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await sleep(5000);
-  const opt = await page.$('[data-testid="conversation-options-button"]');
-  if (!opt) throw new Error('no chat options button on the chat page' + fix('run Dev-Oracle output/t4279/probe-create-move.mjs'));
+  // the chat menu = the header button whose label (aria-label, else its text: no aria-label 21:5x) is the chat title (probe 21:3x); the old testid kept as a fallback.
+  // The header renders late (5 s fixed wait missed it on the scratch chat 21:4x): poll up to 20 s.
+  const findOpt = () => page.evaluateHandle((t) => [...document.querySelectorAll('header button')].find((e) => e.offsetParent !== null && (e.getAttribute('aria-label') || e.textContent || '').trim() === t)
+    || document.querySelector('[data-testid="conversation-options-button"]') || null, title.trim());
+  let opt = null;
+  for (let i = 0; i < 20; i++) { await sleep(1000); opt = await findOpt(); if (await opt.evaluate((e) => !!e)) break; }
+  if (!(await opt.evaluate((e) => !!e))) throw new Error(`no chat menu button (header button "${title}") on the chat page; ${await page.evaluate(() => `innerWidth=${innerWidth} url=${location.pathname} header buttons: ${[...document.querySelectorAll('header button')].map((e) => `${(e.getAttribute('aria-label') || e.textContent || '').trim().slice(0, 30)}${e.offsetParent === null ? '(hidden)' : ''}`).join(' | ') || 'none'}`)}` + fix('run Dev-Oracle output/t4279/probe-dump.mjs <chat id>'));
   await opt.click(); await sleep(1200);
   const mv = await page.evaluateHandle(() => [...document.querySelectorAll('[role="menuitem"]')].find((e) => /move to project|ย้ายไป/i.test(e.textContent || '')) || null);
   if (!(await mv.evaluate((e) => !!e))) { await page.keyboard.press('Escape'); throw new Error('no "Move to project" in the chat menu (English or Thai)' + fix('run Dev-Oracle output/t4279/probe-create-move.mjs')); }
