@@ -81,6 +81,28 @@ const h = md5(f);
 throws(() => P.configWithBrandProject(JSON.parse(after), 'nosuch', 'WB · WealthBanks'));
 check('a refusal writes nothing (md5 same)', md5(f) === h);
 
-const fails = results.filter((x) => !x).length;
+// ── C1 (security on #73): an instructions file goes to OpenAI like a source → same F2 gate (md/txt, tracked, pushed,
+//    no symlink, no ψ/), checked before the browser, for create-project --instructions-file AND project-instructions set ──
+(async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 't4279c1-'));
+  const cfg = path.join(tmp, 'poster.config.json'); fs.writeFileSync(cfg, JSON.stringify(base()));
+  const untracked = path.join(tmp, 'i.md'); fs.writeFileSync(untracked, 'rules\n');
+  const envf = path.join(tmp, '.env'); fs.writeFileSync(envf, 'KEY=x\n');
+  const tracked = path.join(__dirname, '..', 'docs', 'SOP-IMAGE-GEN-V3.md');   // tracked + pushed in this repo
+  const pc = (f) => P.precheck('create-project', { name: 'X', instructionsFile: f }, null, cfg);
+  check('C1 create-project: untracked .md refused before the browser', /instructions/i.test(pc(untracked) || ''), pc(untracked));
+  check('C1 create-project: .env refused', !!pc(envf), pc(envf));
+  check('C1 create-project: positive control, tracked pushed .md passes', pc(tracked) === null, pc(tracked));
+  const page = new Proxy({}, { get: () => { throw new Error('browser touched'); } });
+  const sub = async (f) => { let out = ''; const e = console.error; console.error = (m) => { out += m; }; try { return [await P.projectInstructionsCmd(page, { sub: 'set', project: 'iAgencyAIA', rest: [f] }, { dryRun: true }), out]; } catch (x) { return ['threw', x.message]; } finally { console.error = e; } };
+  const [rc1, m1] = await sub(untracked);
+  check('C1 project-instructions set: untracked .md refused, browser untouched', rc1 !== 0 && rc1 !== 'threw', `${rc1} ${m1.slice(0, 120)}`);
+  const [rc2, m2] = await sub(envf);
+  check('C1 project-instructions set: .env refused, browser untouched', rc2 !== 0 && rc2 !== 'threw', `${rc2} ${m2.slice(0, 120)}`);
+  const [rc3, m3] = await sub(tracked);
+  check('C1 project-instructions set: positive control, tracked .md reaches the browser', rc3 === 'threw' && /browser touched/.test(m3), `${rc3} ${m3.slice(0, 80)}`);
+  fs.rmSync(tmp, { recursive: true, force: true });
+  const fails = results.filter((x) => !x).length;
 console.log(`\n${results.length - fails}/${results.length} pass`);
 process.exit(fails ? 1 : 0);
+})();

@@ -338,6 +338,10 @@ async function projectFilesCmd(page, a, { browserPath, dryRun, sourceGate = chec
 
 async function projectInstructionsCmd(page, a, { dryRun }) {
   if (!['get', 'set'].includes(a.sub)) return refuse('usage: project-instructions get|set --project <name|g-p-id> [file]');
+  if (a.sub === 'set') {   // gate before the browser (security C1 on #73)
+    if (!a.rest[0]) return refuse('project-instructions set needs a file');
+    const g = instructionsGate(a.rest[0]); if (g) return refuse(g);
+  }
   const p = await resolveProject(page, a.project);
   const cur = await readProject(page, p.id);
   const file = a.rest[0];
@@ -410,6 +414,15 @@ async function newProjectChat(page, a, { sendAndConfirm }) {
 
 const readConfig = (file) => JSON.parse(fs.readFileSync(file, 'utf-8'));
 
+/** An instructions file goes to OpenAI like a project source (security C1 on #73): md/txt only, then the same F2 gate
+ *  (tracked, pushed, unchanged, no symlink, nothing under ψ/). Refusal text with a fix line, or null. No browser. */
+function instructionsGate(file) {
+  if (!/\.(md|txt)$/i.test(file || '')) return `instructions file ${file}: only .md or .txt` + fix('export the instructions to a .md file in a brand repo, commit and push it');
+  const g = checkSources([file]);
+  if (!g.ok) return `instructions file refused: ${g.refused.map((r) => r.reason).join('; ')}` + fix('commit + push the .md in a brand repo (not ψ/, not a symlink), then re-run');
+  return null;
+}
+
 /** Refusal text (with its fix line) for what the config alone can refuse, or null. Runs before the browser is touched. */
 function precheck(cmd, a, brand, configPath) {
   try {
@@ -419,6 +432,7 @@ function precheck(cmd, a, brand, configPath) {
         let st = null; try { st = fs.statSync(a.instructionsFile); } catch {}
         if (!st || !st.isFile()) return `--instructions-file ${a.instructionsFile}: not a readable file` + fix('ls -l <file>');
         if (!fs.readFileSync(a.instructionsFile, 'utf-8').trim()) return `--instructions-file ${a.instructionsFile} is empty` + fix('write the instructions into the file first');
+        const g = instructionsGate(a.instructionsFile); if (g) return g;
       }
       const cur = (readConfig(configPath).projects || {})[a.name.trim()];
       if (cur && !GID_RE.test(cur)) return `projects["${a.name.trim()}"] = ${String(cur).slice(0, 40)} is not a g-p id` + fix('edit poster.config.json');
@@ -577,7 +591,7 @@ async function moveChatCmd(page, a, { brand, configPath, dryRun }) {
 const EXIT_TAB_BUSY = 75;
 
 module.exports = {
-  precheck, createProjectCmd, moveChatCmd, readChat,
+  precheck, instructionsGate, createProjectCmd, moveChatCmd, readChat,
   GID_RE, MAX_PER_UPLOAD, CAP, parseArgs, matchProject, planAdd, planRemove,
   configWithProject, configWithBrandProject, writeConfigAtomic,
   listProjects, resolveProject, readProject, addFiles, removeFiles, setInstructions, gotoProject,
