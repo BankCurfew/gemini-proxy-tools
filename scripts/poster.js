@@ -1832,8 +1832,9 @@ Commands:
                       past 40 (Pro) or a name already there; a failure mid-run is reported by name, files already done
                       stay) · remove by file name · each change read back from the server
                       ⚠️ sources upload to OpenAI and stay there: brand, style or reference material only, NO customer
-                      data, NO ψ/ files · md/txt only, from a pushed commit (pre-push scan ran on it) · NO PDF or other
-                      binary until the source gate ships (the scan skips binaries)
+                      data, NO ψ/ files · source gate (every file pushed + unchanged): md/txt · PDF + pushed text twin
+                      X.pdf.txt (pdftotext -layout, ≥100 chars/page) or X.pdf.url (https) · images only from a
+                      *-project-sources/ folder · other types refused (export to md)
   project-instructions get|set --project <name|g-p-id> [file]  get = print (or write to file) · set = Project
                       settings → Save, read back byte-equal
   rename --brand <name>    Set that chat's ChatGPT title to brands.<name>.title (API only, no navigation)
