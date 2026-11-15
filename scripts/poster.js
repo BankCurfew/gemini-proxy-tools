@@ -1831,7 +1831,7 @@ Commands:
   new-chat --project <name|g-p-id> --title <t>  Open a titled chat INSIDE a Project (starts with its sources +
                       instructions), print its URL; poster.config.json is not changed
   project-files list|add|remove --project <name|g-p-id> [files…]  Project Sources: list = name + size ·
-                      add uploads through the Sources UI (≤10 per batch, refuses past 25 or a name already there,
+                      add uploads through the Sources UI (≤10 per batch, refuses past 40 (Pro) or a name already there,
                       all-or-nothing) · remove by file name · each change read back from the server
   project-instructions get|set --project <name|g-p-id> [file]  get = print (or write to file) · set = Project
                       settings → Save, read back byte-equal

@@ -136,7 +136,7 @@ async function readProject(page, gid) {
     name: (g.display && g.display.name) || '',
     files: (r.json.files || []).map((f) => ({ name: f.name, size: f.size, file_id: f.file_id })),
     instructions: typeof g.instructions === 'string' ? g.instructions : '',
-    max: (r.json.project_file_limits && r.json.project_file_limits.max_file_limit) || 25,
+    max: (r.json.project_file_limits && r.json.project_file_limits.max_file_limit) || CAP,
   };
 }
 
@@ -250,7 +250,7 @@ async function setInstructions(page, gid, text) {
 
 // ── commands (poster.js dispatches here; each returns the exit code: 0 ok, 1 refused / not proven) ──
 
-const CAP = 25;   // bob addendum 15 Nov: refuse past 25 even if the server's own limit says more
+const CAP = 40;   // bob 15 Nov 12:0x: plan = Pro (แบงค์) → 40 files per project, 10 per upload; refuse past 40 even if the server says more
 const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round((n || 0) / 1024))} KB`);
 const refuse = (msg) => { console.error(`🚫 ${msg}`); return 1; };
 

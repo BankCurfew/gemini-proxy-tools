@@ -71,7 +71,7 @@ check('--project with no value = refuse', /--project needs a value/.test(throws(
 
 // ── commands on a fake page: refusals must stop BEFORE any UI write (the fake page has no goto/$$ — a write throws) ──
 // The fake answers only the two READ calls (sidebar list + project gizmo), the same shapes the probes recorded.
-function fakePage(files, instructions = '', max = 25) {
+function fakePage(files, instructions = '', max = 40) {
   const reads = [];
   return {
     reads,
@@ -94,16 +94,16 @@ const deps = { browserPath: async (_p, f) => f, dryRun: false };
 (async () => {
   let pg = fakePage(files3);
   let r2 = await quiet(() => P.projectFilesCmd(pg, P.parseArgs(['project-files', 'list', '--project', 'T4249 scratch']), deps));
-  check('list = names + sizes + count, exit 0', r2.code === 0 && /s1\.txt\t2 KB/.test(r2.out) && /3\/25 files in "T4249 scratch"/.test(r2.out), r2.out);
+  check('list = names + sizes + count, exit 0', r2.code === 0 && /s1\.txt\t2 KB/.test(r2.out) && /3\/40 files in "T4249 scratch"/.test(r2.out), r2.out);
 
-  const many = Array.from({ length: 23 }, (_, i) => mk(`many-${i}.txt`));
+  const many = Array.from({ length: 38 }, (_, i) => mk(`many-${i}.txt`));
   pg = fakePage(files3);
   r2 = await quiet(() => P.projectFilesCmd(pg, P.parseArgs(['project-files', 'add', '--project', B, ...many]), deps));
-  check('add past 25 = exit 1, nothing uploaded (reads only)', r2.code === 1 && /nothing uploaded/.test(r2.out) && pg.reads.every((x) => x.startsWith('GET')), r2.out);
+  check('add past 40 = exit 1, nothing uploaded (reads only)', r2.code === 1 && /nothing uploaded/.test(r2.out) && pg.reads.every((x) => x.startsWith('GET')), r2.out);
 
-  pg = fakePage(files3, '', 40);
+  pg = fakePage(files3, '', 60);
   r2 = await quiet(() => P.projectFilesCmd(pg, P.parseArgs(['project-files', 'add', '--project', B, ...many]), deps));
-  check('server limit 40 is still capped at 25 (bob addendum)', r2.code === 1 && /> 25 files/.test(r2.out), r2.out);
+  check('server limit 60 is still capped at 40 (Pro, bob 15 Nov)', r2.code === 1 && /> 40 files/.test(r2.out), r2.out);
 
   pg = fakePage(files3);
   r2 = await quiet(() => P.projectFilesCmd(pg, P.parseArgs(['project-files', 'add', '--project', B, mk('s2.txt')]), deps));
