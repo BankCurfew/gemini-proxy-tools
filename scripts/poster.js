@@ -1302,9 +1302,25 @@ async function listImages(page) {
   }, POSTER_IMG_SELECTOR);
 }
 
+// T4307 (wb 16 Nov): connect() navigates (domcontentloaded + 3 s) and ChatGPT renders the generated blob: images later
+// (wb measured up to ~45 s), so ONE listImages right after nav returned [] → "No large images found" with 2 images in
+// the chat. Poll until something is listed and every listed image has decoded (w > 0), or the deadline: then return
+// whatever is listed (possibly []).
+async function listImagesSettled(page, { timeoutMs = 45000, intervalMs = 1000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let imgs = [];
+  for (let first = true; ; first = false) {
+    imgs = await listImages(page);
+    if (imgs.length && imgs.every((i) => i.w > 0)) return imgs;
+    if (Date.now() >= deadline) return imgs;
+    if (first) console.log(`Waiting for the chat's images to render (up to ${Math.round(timeoutMs / 1000)}s)...`);
+    await sleep(intervalMs);
+  }
+}
+
 async function downloadImage(page, prefix, indexArg) {
   const dateStr = new Date().toISOString().slice(0, 10);
-  const dalleImgs = await listImages(page);
+  const dalleImgs = await listImagesSettled(page);
   if (!dalleImgs.length) {
     console.error('ERROR: No large images found');
     return null;
@@ -1403,7 +1419,7 @@ async function downloadImage(page, prefix, indexArg) {
 }
 
 async function downloadAll(page, prefix) {
-  const dalleImgs = await listImages(page);
+  const dalleImgs = await listImagesSettled(page);
   if (!dalleImgs.length) { console.error('No images found'); return; }
   console.log(`Downloading ${dalleImgs.length} images...`);
   for (let i = 0; i < dalleImgs.length; i++) {
@@ -2063,4 +2079,4 @@ if (require.main === module) main()
     if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(EXIT_TAB_BUSY); }
     console.error('ERROR:', e.message); process.exit(1);
   });   // T2790: requirable by test/t2790-stalled-send.test.js
-module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles, heartbeat, serverLanded, sessionGateVerdict, brandEntryAfterNewChat, newChatStartUrl, browserPath, qaGate, resizeToIG };   // T3014: attachFiles for test/t3014-attach-wait
+module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles, heartbeat, serverLanded, sessionGateVerdict, brandEntryAfterNewChat, newChatStartUrl, browserPath, qaGate, resizeToIG, listImagesSettled };   // T4307: listImagesSettled for test/t4307-wait-for-images   // T3014: attachFiles for test/t3014-attach-wait
