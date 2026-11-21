@@ -955,6 +955,18 @@ async function sendPrompt(page, prompt) {
   return true;
 }
 
+// `prompt` / `send` CLI command → exit code. T599: cross-brand content = ABORT (4), never sent.
+async function promptCmd(page, raw, brand, send = sendPrompt) {
+  const bc = assertBrandMatch(brand, raw);
+  if (!bc.ok) {
+    console.error(`\n🚫 ABORT (T599): ${bc.reason}`);
+    console.error(`   --brand ${brand} prompt must NOT contain cross-brand content.`);
+    return 4;
+  }
+  // T4443: NOT SENT / no new turn = 1, so a chained `wait` + download never runs on an old image
+  return (await send(page, raw)) ? 0 : 1;
+}
+
 async function waitSendEnabled(page, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -1982,16 +1994,7 @@ Examples:
         await generate(page, args[0] || 'raw', args.slice(1).join(' '), args[0]);
         break;
       case 'prompt': case 'send': {
-        // T599: cross-brand assertion on raw prompts too — ABORT, never send.
-        const raw = args.join(' ');
-        const bc = assertBrandMatch(BRAND_FLAG, raw);
-        if (!bc.ok) {
-          console.error(`\n🚫 ABORT (T599): ${bc.reason}`);
-          console.error(`   --brand ${BRAND_FLAG} prompt must NOT contain cross-brand content.`);
-          process.exitCode = 4;
-          break;
-        }
-        await sendPrompt(page, raw);
+        process.exitCode = await promptCmd(page, args.join(' '), BRAND_FLAG);
         break;
       }
       case 'wait': {
@@ -2079,4 +2082,4 @@ if (require.main === module) main()
     if (e instanceof TabBusyError) { console.error('⏳', e.message); await cleanupCreatedPages(); process.exit(EXIT_TAB_BUSY); }
     console.error('ERROR:', e.message); process.exit(1);
   });   // T2790: requirable by test/t2790-stalled-send.test.js
-module.exports = { sendAndConfirm, installComposerFinder, liveRenders, attachFiles, heartbeat, serverLanded, sessionGateVerdict, brandEntryAfterNewChat, newChatStartUrl, browserPath, qaGate, resizeToIG, listImagesSettled };   // T4307: listImagesSettled for test/t4307-wait-for-images   // T3014: attachFiles for test/t3014-attach-wait
+module.exports = { sendAndConfirm, promptCmd, installComposerFinder, liveRenders, attachFiles, heartbeat, serverLanded, sessionGateVerdict, brandEntryAfterNewChat, newChatStartUrl, browserPath, qaGate, resizeToIG, listImagesSettled };   // T4307: listImagesSettled for test/t4307-wait-for-images   // T3014: attachFiles for test/t3014-attach-wait
