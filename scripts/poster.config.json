@@ -11,7 +11,10 @@
   "max_retries": 1,
   "heartbeat_oracle": "Designer-Oracle",
   "projects": {
-    "iAgencyAIA": "g-p-6a548bcae0f481918286e9fb63633e98"
+    "iAgencyAIA": "g-p-6a548bcae0f481918286e9fb63633e98",
+    "ACEP Living Campus style": "g-p-6af8481020708191a9d884f1e0322701",
+    "WealthBanks Covers": "g-p-6a53f65833a4819192fbb93269d6ee90",
+    "DreamBank": "g-p-6af9cd5d58348191af24f083669a925a"
   },
   "brands": {
     "iagencyaia": {
@@ -20,7 +23,8 @@
     },
     "wealthbanks": {
       "chat_id": "6a9e2925-c118-83ec-bd88-56df8cfad384",
-      "created": "2026-09-07T03:02:06.085Z"
+      "created": "2026-09-07T03:02:06.085Z",
+      "project": "WealthBanks Covers"
     },
     "iagencyaia-education": {
       "chat_id": "6ab8beb4-69c4-83ec-9c2b-1899d3716c1e",
@@ -209,6 +213,23 @@
       "project": "iAgencyAIA",
       "set_by": "designer T4064 (แบงค์ 14:4x: design with GPT from his 8 refs, logo+footer overlaid after)",
       "note": "T4064 news-poster redesign chat: refs → GPT design conversation; no logo/footer drawn"
+    },
+    "acep-style": {
+      "chat_id": "6af84844-1c38-83ec-9237-a47fd8cdb8ac",
+      "project": "ACEP Living Campus style",
+      "title": "ACEP STYLE · 2026-11",
+      "created": "2026-11-14T11:38:48.626Z",
+      "set_by": "designer T4225 (bob created project 18:4x, แบงค์: permanent ACEP-only project)",
+      "note": "ACEP images only, same tone as ACEP Canva; never iAgencyAIA/WB here",
+      "previous_chat_id": null
+    },
+    "wealthbanks-mascot": {
+      "base_brand": "wealthbanks",
+      "title": "MASCOT-WEALTH · 2026-11",
+      "set_by": "designer (bob T4419 phase 2 GO 22 พ.ย. 19:1x)",
+      "note": "ONE chat for Wealth (WealthBanks site mascot) renders; never วิง / น้อง We / iAgencyAIA in this chat",
+      "chat_id": "6b02deac-5618-83ec-9c33-4b330f19aeaa",
+      "created": "2026-11-22T12:23:19.802Z"
     }
   },
   "archived": {
